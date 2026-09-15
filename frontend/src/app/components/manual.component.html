@@ -1,0 +1,141 @@
+<div class="panel">
+  <h2 style="margin-top:0">手工配比试算（滑块直算，不经优化器）</h2>
+  <p class="muted">
+    调整干基配比后即时按质量守恒合成并计算 KH/SM/IM；含缺测原料或分母不达标时明确报错。
+    可覆盖含水率模拟雨季对干湿基换算与成本的影响。
+  </p>
+  <div class="demo-row">
+    <button (click)="demo('zero')">演示：零分母报错（92%石英砂）</button>
+    <button (click)="demo('rain')">演示：雨季含水率覆盖</button>
+    <label class="muted">分母保护阈值
+      <input type="number" step="0.01" style="width:80px" [(ngModel)]="denomFloor"
+             (ngModelChange)="onInput()">%
+    </label>
+  </div>
+
+  <div class="manual-grid">
+    <div>
+      <table>
+        <thead>
+          <tr><th>原料</th><th>干基配比 %</th><th>含水率覆盖</th><th>附加成本</th><th></th></tr>
+        </thead>
+        <tbody>
+          @for (r of rows; track r.code) {
+            <tr>
+              <td>
+                {{ r.name }} <span class="muted mono" style="font-size:11px">{{ r.code }}</span>
+                @if (r.baseMoisture !== null) { <div class="muted" style="font-size:11px">基线含水 {{ r.baseMoisture }}%</div> }
+              </td>
+              <td style="min-width:200px">
+                <input type="range" min="0" max="100" step="0.5" [(ngModel)]="r.pct"
+                       (ngModelChange)="onInput()" style="width:130px;vertical-align:middle">
+                <input type="number" min="0" max="100" step="0.1" [(ngModel)]="r.pct"
+                       (ngModelChange)="onInput()" style="width:64px">
+              </td>
+              <td>
+                <input type="number" placeholder="基线" [(ngModel)]="r.moistureOverride"
+                       (ngModelChange)="onInput()" style="width:78px">
+              </td>
+              <td><input type="number" min="0" step="0.5" [(ngModel)]="r.extraCost"
+                         (ngModelChange)="onInput()" style="width:70px"></td>
+              <td><button (click)="remove(r.code)">删</button></td>
+            </tr>
+          }
+        </tbody>
+      </table>
+      <div style="margin-top:8px">
+        <select #sel (change)="addMaterial(sel.value); sel.value=''">
+          <option value="">＋ 添加原料…</option>
+          @for (m of addableMaterials; track m.code) {
+            <option [value]="m.code">{{ m.name }}（{{ m.code }}）</option>
+          }
+        </select>
+        <span class="sum-tag" [class.bad]="sumBad">
+          合计 {{ sumPct | number:'1.1-1' }}%（必须 = 100%）
+        </span>
+      </div>
+    </div>
+
+    <div class="result-side">
+      @if (error) {
+        <div class="error-box">{{ error }}</div>
+      }
+      @if (trace && !sumBad) {
+        <div>
+          <div class="grid3 kpis">
+            <div class="kpi-box">
+              <div class="kpi">{{ trace.indicators.kh | number:'1.3-3' }}</div>
+              <small>KH 石灰饱和系数</small>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi">{{ trace.indicators.sm | number:'1.2-2' }}</div>
+              <small>硅率 SM = SiO₂/(Al₂O₃+Fe₂O₃)</small>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi">{{ trace.indicators.im | number:'1.2-2' }}</div>
+              <small>铝率 IM = Al₂O₃/Fe₂O₃</small>
+            </div>
+          </div>
+          @if (trace.kh_warning) { <div class="warn-box">⚠ {{ trace.kh_warning }}</div> }
+          <div class="cost-line">
+            成本 <b class="kpi">{{ trace.cost_dry_t | number:'1.2-2' }}</b> 元/吨干生料
+            · 折合 {{ trace.cost_wet_equiv_t | number:'1.2-2' }} 元/湿吨
+            · 碱当量 {{ trace.alkali_eq_pct | number:'1.3-3' }}%
+          </div>
+          <h4>合成成分（干基 / 灼烧基）</h4>
+          <table>
+            <thead>
+              <tr><th>氧化物</th><th>干基 %</th><th>灼烧基 %</th><th>各原料贡献条</th></tr>
+            </thead>
+            <tbody>
+              @for (o of oxideRows; track o.key) {
+                <tr>
+                  <td>{{ o.label }}</td>
+                  <td>{{ trace.composition_dry_pct[o.key] | number:'1.3-3' }}</td>
+                  <td class="muted">{{ ignVal(o.key) }}</td>
+                  <td style="min-width:240px">
+                    <div class="stack-source">
+                      @for (seg of sourceStack(o.key); track seg.code) {
+                        <div class="ss-part" [style.flex-grow]="seg.value"
+                             [style.background]="seg.color" [title]="seg.name+' '+seg.share.toFixed(1)+'%'"></div>
+                      }
+                    </div>
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+          <details>
+            <summary>干湿基换算明细与质量守恒</summary>
+            <table>
+              <thead>
+                <tr><th>原料</th><th>干基%</th><th>含水率%</th><th>湿吨/干吨</th>
+                    <th>湿基%</th><th>干基价</th><th>成本贡献</th></tr>
+              </thead>
+              <tbody>
+                @for (m of activeMaterialRows; track m.material) {
+                  <tr>
+                    <td>{{ m.name }}</td>
+                    <td>{{ m.fraction_dry_pct | number:'1.2-2' }}</td>
+                    <td>{{ m.moisture_pct | number:'1.2-2' }}</td>
+                    <td>{{ m.dry_factor_t_per_t | number:'1.4-4' }}</td>
+                    <td>{{ m.fraction_wet_pct | number:'1.2-2' }}</td>
+                    <td>{{ m.price_dry_t | number:'1.2-2' }}</td>
+                    <td>{{ m.cost_contribution | number:'1.3-3' }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+            <p class="muted">
+              1000 kg 干生料需收到基 {{ trace.mass_balance.wet_input_kg | number:'1.1-1' }} kg，
+              其中水 {{ trace.mass_balance.water_kg | number:'1.1-1' }} kg，
+              灼烧后 {{ trace.mass_balance.ignited_kg | number:'1.1-1' }} kg。
+            </p>
+          </details>
+        </div>
+      } @else if (!error) {
+        <div class="muted">配比合计需为 100% 才能计算（当前 {{ sumPct | number:'1.1-1' }}%）。</div>
+      }
+    </div>
+  </div>
+</div>

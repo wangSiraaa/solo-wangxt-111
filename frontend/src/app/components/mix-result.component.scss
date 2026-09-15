@@ -1,0 +1,39 @@
+.sol-head { display: flex; justify-content: space-between; align-items: center; }
+.kpis { margin: 12px 0; }
+.kpi-box {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 12px 14px;
+}
+.cost-row {
+  display: flex; gap: 26px; align-items: baseline; flex-wrap: wrap;
+  background: var(--panel-2); border-radius: 8px; padding: 10px 14px; margin: 10px 0;
+}
+.mix-stack {
+  display: flex; width: 100%; height: 38px; border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--line);
+}
+.seg-wrap {
+  display: flex; flex-direction: column; justify-content: center;
+  border-right: 1px solid rgba(0,0,0,.45); min-width: 2px; position: relative;
+  &.cheap { box-shadow: inset 0 0 0 2px var(--cheap); }
+}
+.seg-inner { display: flex; height: 100%; width: 100%; }
+.seg-part { min-width: 0; }
+.seg-label {
+  position: absolute; left: 6px; font-size: 11px; color: #fff;
+  text-shadow: 0 1px 2px #000; white-space: nowrap; overflow: hidden;
+}
+.legend {
+  display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+  margin: 6px 0 10px; font-size: 12px;
+  span { display: inline-flex; align-items: center; gap: 4px; }
+  i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+}
+.mass-balance {
+  margin-top: 8px; padding: 8px 12px; background: var(--panel-2);
+  border-radius: 6px; font-size: 12px; line-height: 1.7;
+}
+.overridden { color: var(--warn); font-weight: 600; }
+.sum-row td { border-top: 2px solid var(--accent); }
+.coef { color: var(--muted); font-size: 11px; }
+h4 { margin: 14px 0 6px; }

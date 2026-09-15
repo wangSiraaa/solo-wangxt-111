@@ -1,0 +1,77 @@
+/* 全局样式：离线试算工作台 */
+:root {
+  --bg: #0f141b;
+  --panel: #181f2a;
+  --panel-2: #1f2836;
+  --line: #2c384a;
+  --txt: #dce4ee;
+  --muted: #8b99ab;
+  --accent: #4da3ff;
+  --good: #38c172;
+  --warn: #f0b429;
+  --bad: #ef5350;
+  --cheap: #b39ddb;
+  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--txt); font-size: 14px; }
+h1, h2, h3 { font-weight: 600; }
+button {
+  font-family: inherit; font-size: 13px; cursor: pointer;
+  background: var(--panel-2); color: var(--txt);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: #2b6cb0; border-color: #2b6cb0; color: #fff; }
+button.primary:hover { background: #3182ce; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+input, select {
+  background: var(--bg); color: var(--txt);
+  border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px;
+  font-family: inherit; font-size: 13px;
+}
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 500; background: var(--panel-2); position: sticky; top: 0; }
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 16px; margin-bottom: 16px;
+}
+.badge {
+  display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.badge.good { color: var(--good); border-color: var(--good); }
+.badge.bad { color: var(--bad); border-color: var(--bad); }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+.badge.cheap { color: var(--cheap); border-color: var(--cheap); }
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.bar-track { background: var(--bg); border-radius: 4px; height: 14px; overflow: hidden; min-width: 60px; }
+.bar-fill { height: 100%; border-radius: 4px; }
+.error-box {
+  background: rgba(239, 83, 80, .12); border: 1px solid var(--bad);
+  color: #ffb4b2; border-radius: 8px; padding: 10px 14px; margin: 10px 0;
+}
+.warn-box {
+  background: rgba(240, 180, 41, .12); border: 1px solid var(--warn);
+  color: #f5d78e; border-radius: 8px; padding: 10px 14px; margin: 10px 0;
+}
+.scroll-x { overflow-x: auto; }
+details { margin: 8px 0; }
+summary { cursor: pointer; color: var(--accent); user-select: none; }
+.tab-row { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+.tab {
+  padding: 8px 18px; border-radius: 8px 8px 0 0; border: 1px solid transparent;
+  border-bottom: 2px solid transparent; background: transparent; color: var(--muted);
+}
+.tab.active { color: var(--txt); border-bottom-color: var(--accent); background: var(--panel); }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; }
+.kpi { font-size: 22px; font-weight: 600; }
+.kpi.in-range { color: var(--good); }
+.kpi.out-range { color: var(--bad); }
+.kpi small { font-size: 12px; color: var(--muted); font-weight: 400; }
+.missing-cell { color: var(--bad); font-weight: 600; }
+.zero-cell { color: var(--muted); }

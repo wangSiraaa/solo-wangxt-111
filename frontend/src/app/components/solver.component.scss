@@ -1,0 +1,16 @@
+.scenario-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.targets {
+  display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 0;
+  background: var(--panel-2); border-radius: 8px; padding: 10px 14px;
+  b { color: var(--accent); }
+}
+.materials-line { line-height: 2.1; }
+.mat-chip {
+  display: inline-block; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 14px; padding: 2px 10px; margin: 2px 4px;
+}
+.run-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+.cmp-table td, .cmp-table th { white-space: nowrap; }
+.inrange { color: var(--good); font-weight: 600; }
+.outrange { color: var(--bad); font-weight: 600; }
+.up { color: var(--warn); font-weight: 600; }

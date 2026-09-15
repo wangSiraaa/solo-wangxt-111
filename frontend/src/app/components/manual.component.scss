@@ -1,0 +1,16 @@
+.demo-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.manual-grid { display: grid; grid-template-columns: minmax(420px, 1.1fr) minmax(360px, 1fr); gap: 18px; }
+@media (max-width: 1000px) { .manual-grid { grid-template-columns: 1fr; } }
+.sum-tag { margin-left: 12px; color: var(--muted); }
+.sum-tag.bad { color: var(--bad); font-weight: 600; }
+.kpi-box {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+  small { color: var(--muted); }
+}
+.cost-line {
+  background: var(--panel-2); border-radius: 8px; padding: 8px 12px; margin: 8px 0;
+}
+.stack-source { display: flex; height: 14px; border-radius: 4px; overflow: hidden; }
+.ss-part { min-width: 0; }
+input[type="range"] { accent-color: var(--accent); }

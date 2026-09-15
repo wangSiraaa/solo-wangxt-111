@@ -1,0 +1,265 @@
+@if (t; as tb) {
+<div class="panel solution">
+  <div class="sol-head">
+    <h3 style="margin:0">
+      @switch (sol.mode) {
+        @case ('min_cost') { 💰 最低成本方案 }
+        @case ('target_center') { 🎯 指标居中方案 }
+        @case ('max_cheap') { 🏷 廉价原料最大化方案 }
+        @default { {{ sol.mode }} }
+      }
+    </h3>
+    <div>
+      <span class="badge good">可行</span>
+      @if (sol.trace.duplicate) { <span class="badge">与其他方案近似重复</span> }
+    </div>
+  </div>
+
+  <!-- 指标 KPI -->
+  <div class="grid3 kpis">
+    <div class="kpi-box">
+      <div class="kpi" [class.in-range]="inRange(ind!.kh, scenario!.targets.kh[0], scenario!.targets.kh[1])"
+           [class.out-range]="!inRange(ind!.kh, scenario!.targets.kh[0], scenario!.targets.kh[1])">
+        {{ ind!.kh | number:'1.3-3' }}
+        <small>KH 目标 {{ scenario!.targets.kh[0] }}–{{ scenario!.targets.kh[1] }}</small>
+      </div>
+    </div>
+    <div class="kpi-box">
+      <div class="kpi" [class.in-range]="inRange(ind!.sm, scenario!.targets.sm[0], scenario!.targets.sm[1])"
+           [class.out-range]="!inRange(ind!.sm, scenario!.targets.sm[0], scenario!.targets.sm[1])">
+        {{ ind!.sm | number:'1.2-2' }}
+        <small>硅率 SM 目标 {{ scenario!.targets.sm[0] }}–{{ scenario!.targets.sm[1] }}</small>
+      </div>
+    </div>
+    <div class="kpi-box">
+      <div class="kpi" [class.in-range]="inRange(ind!.im, scenario!.targets.im[0], scenario!.targets.im[1])"
+           [class.out-range]="!inRange(ind!.im, scenario!.targets.im[0], scenario!.targets.im[1])">
+        {{ ind!.im | number:'1.2-2' }}
+        <small>铝率 IM 目标 {{ scenario!.targets.im[0] }}–{{ scenario!.targets.im[1] }}</small>
+      </div>
+    </div>
+  </div>
+  @if (tb.kh_warning) { <div class="warn-box">⚠ {{ tb.kh_warning }}</div> }
+
+  <!-- 成本 -->
+  <div class="cost-row">
+    <div><b class="kpi">{{ tb.cost_dry_t | number:'1.2-2' }}</b> 元/吨<b>干生料</b></div>
+    <div class="muted">折合 {{ tb.cost_wet_equiv_t | number:'1.2-2' }} 元/吨收到基混合料</div>
+    <div class="muted">每 1 t 干生料需湿料合计 {{ tb.total_wet_mass_t_per_t_dry | number:'1.3-3' }} t</div>
+  </div>
+
+  <!-- 配比（干基）堆叠条：每段内部再按氧化物细分 -->
+  <h4>原料配比（干基质量分数，Σ=100%）— 颜色按氧化物质量贡献细分</h4>
+  <div class="mix-stack">
+    @for (m of mixEntries; track m.code) {
+      <div class="seg-wrap" [style.flex-grow]="m.pct" [class.cheap]="m.cheap"
+           [title]="m.code + ' ' + (m.pct|number:'1.2-2') + '%'">
+        <div class="seg-inner">
+          @for (s of stackedSegmentsFor(m.code); track s.key) {
+            <div class="seg-part" [style.flex-grow]="s.pctOfBlend"
+                 [style.background]="s.color"></div>
+          }
+        </div>
+        @if (m.pct > 4) { <span class="seg-label">{{ m.name }} {{ m.pct | number:'1.1-1' }}%</span> }
+      </div>
+    }
+  </div>
+  <div class="legend muted">
+    @for (o of oxides; track o.key) {
+      <span><i [style.background]="o.color"></i>{{ o.label }}</span>
+    }
+    <span class="badge cheap">紫框=廉价原料</span>
+  </div>
+
+  <!-- 氧化物来源与比例 -->
+  <details open>
+    <summary>氧化物来源与比例（质量守恒合成；每格：对干生料贡献% ＋ 占该氧化物来源比例条）</summary>
+    <div class="scroll-x">
+      <table>
+        <thead>
+          <tr>
+            <th>原料（化验版本）</th>
+            @for (o of oxides; track o.key) { <th>{{ o.label }}</th> }
+          </tr>
+        </thead>
+        <tbody>
+          @for (row of tb.materials; track row.material) {
+            <tr>
+              <td>
+                {{ row.name }}
+                @if (isCheap(row.material)) {
+                  <span class="badge cheap">廉价</span>
+                }
+                <div class="muted mono" style="font-size:11px">
+                  {{ row.material }} · {{ assayVersion(row.material) }}
+                </div>
+              </td>
+              @for (o of oxides; track o.key) {
+                <td>
+                  <div class="mono" style="font-size:12px">
+                    {{ row.oxide_contribution_pct[o.key] | number:'1.3-3' }}
+                  </div>
+                  <div class="bar-track">
+                    <div class="bar-fill" [style.width.%]="sourceShare(row,o.key)"
+                         [style.background]="o.color"></div>
+                  </div>
+                </td>
+              }
+            </tr>
+          }
+          <tr class="sum-row">
+            <td><b>合成（干基）</b></td>
+            @for (o of oxides; track o.key) {
+              <td><b>{{ tb.composition_dry_pct[o.key] | number:'1.3-3' }}</b></td>
+            }
+          </tr>
+          <tr>
+            <td class="muted">合成（灼烧基，×{{ tb.loi_scaling_factor | number:'1.4-4' }}）</td>
+            @for (o of oxides; track o.key) {
+              <td class="muted">{{ ignVal(o.key) }}</td>
+            }
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </details>
+
+  <!-- 干湿基换算与成本 -->
+  <details>
+    <summary>干湿基换算与成本（湿吨 = 干吨 /（1−含水率））</summary>
+    <div class="scroll-x">
+      <table>
+        <thead>
+          <tr>
+            <th>原料</th><th>干基配比 %</th><th>含水率 %</th><th>换算系数<br>湿吨/干吨</th>
+            <th>湿料质量 t/t干</th><th>湿基配比 %</th>
+            <th>到厂价<br>元/湿吨</th><th>干基价<br>元/干吨</th><th>成本贡献<br>元/t干生料</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (row of tb.materials; track row.material) {
+            <tr>
+              <td>{{ row.name }}
+                @if (row.moisture_overridden) { <span class="badge warn">雨季覆盖</span> }
+              </td>
+              <td>{{ row.fraction_dry_pct | number:'1.3-3' }}</td>
+              <td [class.overridden]="row.moisture_overridden">
+                {{ row.moisture_pct | number:'1.2-2' }}
+                @if (row.moisture_overridden) {
+                  <span class="muted"> (基线 {{ row.base_moisture_pct | number:'1.2-2' }})</span>
+                }
+                @if (row.extra_cost_wet_t > 0) {
+                  <div class="muted">+{{ row.extra_cost_wet_t }} 元附加</div>
+                }
+              </td>
+              <td>{{ row.dry_factor_t_per_t | number:'1.4-4' }}</td>
+              <td>{{ row.wet_mass_t_per_t_dry_blend | number:'1.4-4' }}</td>
+              <td>{{ row.fraction_wet_pct | number:'1.2-2' }}</td>
+              <td>{{ row.price_wet_t | number:'1.2-2' }}</td>
+              <td>{{ row.price_dry_t | number:'1.2-2' }}</td>
+              <td><b>{{ row.cost_contribution | number:'1.3-3' }}</b></td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+    <div class="mass-balance">
+      <div>📦 {{ tb.mass_balance.basis }}</div>
+      <div>干料投入 {{ tb.mass_balance.dry_input_kg | number:'1.0-0' }} kg ·
+        随水带入 {{ tb.mass_balance.water_kg | number:'1.1-1' }} kg ·
+        收到基合计 {{ tb.mass_balance.wet_input_kg | number:'1.1-1' }} kg ·
+        灼烧后 {{ tb.mass_balance.ignited_kg | number:'1.1-1' }} kg</div>
+    </div>
+  </details>
+
+  <!-- 分母保护 -->
+  <details>
+    <summary>率值分母保护校验（低于 {{ scenario?.denom_floor }}% 即拒绝，不按零含量算）</summary>
+    <table>
+      <thead><tr><th>分母项</th><th>合成值 %</th><th>保护阈值 %</th><th>结果</th></tr></thead>
+      <tbody>
+        @for (c of tb.denominator_checks; track c.name) {
+          <tr>
+            <td>{{ c.name }}</td>
+            <td>{{ c.value | number:'1.4-4' }}</td>
+            <td>{{ c.floor | number:'1.2-2' }}</td>
+            <td><span class="badge" [class.good]="c.ok" [class.bad]="!c.ok">{{ c.ok ? '通过' : '触发拒绝' }}</span></td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </details>
+
+  <!-- 追溯 -->
+  <details>
+    <summary>追溯：原始化验版本、换算口径与优化约束</summary>
+    <p class="muted">{{ prov?.profile_note }}</p>
+    <h4>生效化验版本（缺测=红色「缺测」，0.00=灰色未检出，二者语义不同）</h4>
+    <div class="scroll-x">
+      <table>
+        <thead>
+          <tr>
+            <th>原料</th><th>化验版本</th><th>实验室备注</th>
+            @for (o of oxides; track o.key) { <th>{{ o.label }}</th> }
+            <th>湿吨价</th><th>最低/上限%</th><th>可供量备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (v of materialRows; track v.material) {
+            <tr>
+              <td>{{ v.name }}<div class="muted mono" style="font-size:11px">{{ v.material }}</div></td>
+              <td class="mono">{{ v.assay_version }}<div class="muted" style="font-size:11px">#{{ v.assay_id }}</div></td>
+              <td style="text-align:left;white-space:normal;min-width:160px">{{ v.lab_note }}</td>
+              @for (o of oxides; track o.key) {
+                <td [class.missing-cell]="v.composition_dry_pct[o.key]===null"
+                    [class.zero-cell]="v.composition_dry_pct[o.key]===0">
+                  @if (v.composition_dry_pct[o.key] !== null) {
+                    {{ v.composition_dry_pct[o.key] | number:'1.2-2' }}
+                  } @else { <span title="缺测，未按零处理">缺测</span> }
+                </td>
+              }
+              <td>{{ v.price_wet_t }}</td>
+              <td>{{ v.min_pct }} / {{ v.max_pct }}</td>
+              <td style="text-align:left;white-space:normal">{{ v.availability_note || '—' }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+
+    <h4>计算口径</h4>
+    <ul class="mono" style="font-size:12px;line-height:1.7">
+      @for (b of basisEntries; track b) { <li>{{ b }}</li> }
+    </ul>
+
+    <h4>优化器线性约束（SLSQP / HiGHS 共用）</h4>
+    <div class="scroll-x">
+      <table>
+        <thead><tr><th>约束</th><th>方向</th><th>RHS</th><th>各原料系数</th></tr></thead>
+        <tbody>
+          @for (lc of prov?.linear_constraints; track lc.name) {
+            <tr>
+              <td>{{ lc.name }}</td>
+              <td>{{ lc.sense === 'ge' ? '≥' : '≤' }}</td>
+              <td>{{ lc.rhs }}</td>
+              <td style="text-align:left">
+                @for (e of coefEntries(lc.coef); track e[0]) {
+                  <span class="mono coef">{{ e[0] }}:{{ e[1] }}&nbsp;</span>
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  </details>
+</div>
+} @else {
+  <div class="panel">
+    <h3 style="margin-top:0">{{ sol.mode }} <span class="badge bad">{{ sol.status }}</span></h3>
+    <div class="error-box">
+      {{ sol.trace.reason || '求解失败' }}
+      @if (sol.trace.error_code) { （{{ sol.trace.error_code }}） }
+    </div>
+  </div>
+}

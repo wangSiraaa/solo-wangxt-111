@@ -1,0 +1,145 @@
+<div class="panel">
+  <h2 style="margin-top:0">配比试算场景（虚构工艺边界）</h2>
+  <div class="scenario-buttons">
+    @for (s of scenarios; track s.id) {
+      <button [class.primary]="s.id===selectedId" (click)="select(s.id)">{{ s.name }}</button>
+    }
+  </div>
+  @if (scenario) {
+    <p class="muted" style="white-space:pre-line">{{ scenario.description }}</p>
+    <div class="targets">
+      <span>目标 KH <b>{{ scenario.targets.kh[0] }}–{{ scenario.targets.kh[1] }}</b></span>
+      <span>SM <b>{{ scenario.targets.sm[0] }}–{{ scenario.targets.sm[1] }}</b></span>
+      <span>IM <b>{{ scenario.targets.im[0] }}–{{ scenario.targets.im[1] }}</b></span>
+      <span>MgO≤<b>{{ scenario.hazards.mgo_max }}%</b></span>
+      <span>SO₃≤<b>{{ scenario.hazards.so3_max }}%</b></span>
+      <span>碱当量≤<b>{{ scenario.hazards.alkali_eq_max }}%</b></span>
+      <span>Cl⁻≤<b>{{ scenario.hazards.cl_max }}%</b></span>
+      <span>分母地板 <b>{{ scenario.denom_floor }}%</b></span>
+    </div>
+    <div class="materials-line muted">
+      参与原料：
+      @for (m of scenario.materials; track m.code) {
+        <span class="mat-chip">
+          {{ m.name }}
+          <span class="mono">({{ m.code }})</span>
+          最低 <b>{{ m.min_pct }}%</b>
+          @if (m.max_pct !== null) { / 场景上限 <b>{{ m.max_pct }}%</b> }
+          @if (m.preferred_cheap) { <span class="badge cheap">廉价</span> }
+        </span>
+      }
+    </div>
+    @if (hasRain) {
+      <div class="muted">
+        雨季含水率覆盖：
+        @for (e of rainEntries(); track e[0]) {
+          <span class="mono">{{ e[0] }}→{{ e[1] }}% </span>
+        }
+      </div>
+    }
+
+    <div class="run-row">
+      <button class="primary" [disabled]="loading" (click)="run('base')">① 按基线（旱季）求解</button>
+      <button class="primary" [disabled]="loading" (click)="run('rain')">② 按雨季含水率/附加成本求解</button>
+      @if (base || rain) {
+        <span class="profile-tabs">
+          <button [class.primary]="activeProfile==='base'" (click)="run('base')">查看基线结果</button>
+          <button [class.primary]="activeProfile==='rain'" (click)="run('rain')">查看雨季结果</button>
+        </span>
+      }
+    </div>
+  }
+</div>
+
+@if (error) {
+  <div class="error-box" style="font-size:14px">
+    <b>硬性错误（已拒绝计算，未使用零含量兜底）：</b><br>{{ error }}
+  </div>
+}
+
+@if (loading) { <div class="panel">求解中…（SLSQP 多起点 + HiGHS 可行性校验）</div> }
+
+@if (current && current.status === 'infeasible') {
+  <app-conflicts [conflicts]="current.conflicts"></app-conflicts>
+}
+
+<!-- 旱季 vs 雨季对比表（两侧都有可行解时展示） -->
+@if (feasible(base).length && feasible(rain).length) {
+  <div class="panel">
+    <h3 style="margin-top:0">🌦 旱季 vs 雨季：同一方案偏好的成本与配比对比</h3>
+    <div class="scroll-x">
+      <table class="cmp-table">
+        <thead>
+          <tr>
+            <th>方案偏好</th>
+            <th>干基成本(旱)</th><th>干基成本(雨)</th><th>增加</th>
+            <th>KH 旱→雨</th><th>SM 旱→雨</th><th>IM 旱→雨</th>
+            <th>廉价料占比 旱→雨</th><th>湿料总量 t/t干 旱→雨</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (r of compareRows(); track r.mode) {
+            @if (r.base || r.rain) {
+              <tr>
+                <td>{{ r.label }}</td>
+                <td>{{ r.base?.cost_dry_t !== undefined ? (r.base!.cost_dry_t | number:'1.2-2') : '—' }}</td>
+                <td>{{ r.rain?.cost_dry_t !== undefined ? (r.rain!.cost_dry_t | number:'1.2-2') : '—' }}</td>
+                <td [class.up]="deltaCost(r.base,r.rain)>0">
+                  {{ r.base && r.rain ? '+' + (deltaCost(r.base,r.rain)|number:'1.2-2') : '—' }}
+                </td>
+                <td>{{ arrow(r.base?.kh, r.rain?.kh) }}</td>
+                <td>{{ arrow(r.base?.sm, r.rain?.sm) }}</td>
+                <td>{{ arrow(r.base?.im, r.rain?.im) }}</td>
+                <td>{{ pctArrow(cheapPct(r.base), cheapPct(r.rain)) }}</td>
+                <td>{{ arrow(r.base?.trace?.trace?.total_wet_mass_t_per_t_dry,
+                             r.rain?.trace?.trace?.total_wet_mass_t_per_t_dry, '1.3-3') }}</td>
+              </tr>
+            }
+          }
+        </tbody>
+      </table>
+    </div>
+    <p class="muted" style="margin-bottom:0">
+      雨季通过含水率覆盖改变干湿基换算（干基成本上升、湿料用量增加），优化器在相同率值边界下重新分配配比；
+      点开任一方案的「干湿基换算」可逐原料核对换算过程。
+    </p>
+  </div>
+}
+
+<!-- 当前 profile 的多方案对比 -->
+@if (current && current.status === 'feasible') {
+  <div class="panel">
+    <h3 style="margin-top:0">{{ activeProfile==='rain' ? '🌧 雨季' : '☀ 旱季' }}多可行解对比</h3>
+    <div class="scroll-x">
+      <table class="cmp-table">
+        <thead>
+          <tr>
+            <th>方案</th><th>干基成本</th><th>折合湿基</th><th>KH</th><th>SM</th><th>IM</th>
+            <th>廉价料占比</th>
+            @for (m of (scenario?.materials ?? []); track m.code) { <th>{{ m.name }} %</th> }
+          </tr>
+        </thead>
+        <tbody>
+          @for (s of feasible(current); track s.solution_id) {
+            <tr>
+              <td>{{ modeLabel(s.mode) }}</td>
+              <td><b>{{ s.cost_dry_t | number:'1.2-2' }}</b></td>
+              <td>{{ s.cost_wet_t | number:'1.2-2' }}</td>
+              <td [class.inrange]="inKh(s.kh)" [class.outrange]="!inKh(s.kh)">{{ s.kh | number:'1.3-3' }}</td>
+              <td [class.inrange]="inSm(s.sm)" [class.outrange]="!inSm(s.sm)">{{ s.sm | number:'1.2-2' }}</td>
+              <td [class.inrange]="inIm(s.im)" [class.outrange]="!inIm(s.im)">{{ s.im | number:'1.2-2' }}</td>
+              <td>{{ cheapPct(s) | number:'1.1-1' }}%</td>
+              @for (m of (scenario?.materials ?? []); track m.code) {
+                <td>{{ s.mix[m.code] !== undefined ? (s.mix[m.code] | number:'1.2-2') : '0.00' }}</td>
+              }
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  @for (s of feasible(current); track s.solution_id) {
+    <app-mix-result [sol]="s" [scenario]="scenario ?? null"></app-mix-result>
+  }
+}

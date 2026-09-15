@@ -1,0 +1,161 @@
+"""SQLAlchemy 模型：检测成分（化验版本）、成本、可用量、场景与求解结果。
+
+所有氧化物成分均以「干基质量百分数」存储；湿基（收到基）只与含水率相关，
+通过 moisture_pct 动态换算，换算过程在 optimizer.trace 中留痕。
+"""
+from datetime import datetime
+
+from sqlalchemy import (
+    String, Float, Integer, Boolean, DateTime, ForeignKey, Text, UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .database import Base
+
+
+class Material(Base):
+    __tablename__ = "material"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True)
+    name: Mapped[str] = mapped_column(String(64))
+    category: Mapped[str] = mapped_column(String(32), default="原料")  # 钙质/硅铝质/铁质/校正料
+    # 当前生效的化验版本号
+    active_assay_id: Mapped[int | None] = mapped_column(ForeignKey("assay.id", use_alter=True), nullable=True)
+    active_cost_id: Mapped[int | None] = mapped_column(ForeignKey("cost.id", use_alter=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    assays: Mapped[list["Assay"]] = relationship(foreign_keys="Assay.material_id", back_populates="material")
+    costs: Mapped[list["Cost"]] = relationship(foreign_keys="Cost.material_id", back_populates="material")
+    availability: Mapped["Availability | None"] = relationship(back_populates="material", uselist=False)
+
+
+class Assay(Base):
+    """一个化验版本。氧化物列：缺失（NULL）与显式 0.0 语义不同——
+    NULL 表示缺测，参与配比合成时必须报缺测错误；0.0 表示未检出。"""
+    __tablename__ = "assay"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_id: Mapped[int] = mapped_column(ForeignKey("material.id"))
+    version: Mapped[str] = mapped_column(String(32))
+    sampled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lab_note: Mapped[str] = mapped_column(Text, default="")
+
+    # 含水率（湿基）：水占收到基总质量百分数
+    moisture_pct: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # 干基化学成分（%，烧失前生料基口径）；允许 None = 缺测
+    cao: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sio2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    al2o3: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fe2o3: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mgo: Mapped[float | None] = mapped_column(Float, nullable=True)
+    so3: Mapped[float | None] = mapped_column(Float, nullable=True)
+    k2o: Mapped[float | None] = mapped_column(Float, nullable=True)
+    na2o: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    loi: Mapped[float | None] = mapped_column(Float, nullable=True)  # 烧失量（干基）
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    material: Mapped[Material] = relationship(foreign_keys=[material_id], back_populates="assays")
+    __table_args__ = (UniqueConstraint("material_id", "version", name="uq_assay_material_version"),)
+
+
+class Cost(Base):
+    """到厂价，按收到基（湿基）每吨人民币计。干基成本由含水率换算。"""
+    __tablename__ = "cost"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_id: Mapped[int] = mapped_column(ForeignKey("material.id"))
+    price_wet_t: Mapped[float] = mapped_column(Float)  # 元/吨收到基
+    effective_from: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+    material: Mapped[Material] = relationship(foreign_keys=[material_id], back_populates="costs")
+
+
+class Availability(Base):
+    """工厂可用量上限（干基占生料质量百分数口径的简化约束，见 optimizer）。
+    max_fraction_pct 是该原料在干生料中允许的最高配比；-1 表示不限制。"""
+    __tablename__ = "availability"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_id: Mapped[int] = mapped_column(ForeignKey("material.id"), unique=True)
+    max_fraction_pct: Mapped[float] = mapped_column(Float, default=-1.0)
+    supply_note: Mapped[str] = mapped_column(Text, default="")
+
+    material: Mapped[Material] = relationship(back_populates="availability")
+
+
+class Scenario(Base):
+    """配比试算场景：指标目标、有害上限、参与的原料及最低掺量。"""
+    __tablename__ = "scenario"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # 率值目标区间（虚构工艺边界，仅用于离线研究）
+    kh_min: Mapped[float] = mapped_column(Float)
+    kh_max: Mapped[float] = mapped_column(Float)
+    sm_min: Mapped[float] = mapped_column(Float)
+    sm_max: Mapped[float] = mapped_column(Float)
+    im_min: Mapped[float] = mapped_column(Float)
+    im_max: Mapped[float] = mapped_column(Float)
+
+    # 有害组分上限（干基生料百分数）；碱当量按 Na2O + 0.658*K2O
+    mgo_max: Mapped[float] = mapped_column(Float, default=5.0)
+    so3_max: Mapped[float] = mapped_column(Float, default=1.5)
+    alkali_eq_max: Mapped[float] = mapped_column(Float, default=1.0)
+    cl_max: Mapped[float] = mapped_column(Float, default=0.03)
+
+    # 分母保护阈值：小于该值视为分母缺失（不允许静默按零含量算）
+    denom_floor: Mapped[float] = mapped_column(Float, default=0.05)
+
+    # 雨季含水率覆盖（JSON: {material_code: moisture_pct}），用于含水率差异演示
+    rain_overrides: Mapped[str] = mapped_column(Text, default="{}")
+    # 雨季额外成本（元/湿吨，可选，默认 0）
+    rain_extra_cost_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    items: Mapped[list["ScenarioMaterial"]] = relationship(
+        back_populates="scenario", cascade="all, delete-orphan"
+    )
+
+
+class ScenarioMaterial(Base):
+    __tablename__ = "scenario_material"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scenario_id: Mapped[int] = mapped_column(ForeignKey("scenario.id"))
+    material_id: Mapped[int] = mapped_column(ForeignKey("material.id"))
+    min_pct: Mapped[float] = mapped_column(Float, default=0.0)   # 最低掺量（干基百分数）
+    max_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # 场景级上限，空则用可用量
+    preferred_cheap: Mapped[bool] = mapped_column(Boolean, default=False)  # 标记「廉价原料」用于方案三
+
+    scenario: Mapped[Scenario] = relationship(back_populates="items")
+    material: Mapped[Material] = relationship()
+    __table_args__ = (UniqueConstraint("scenario_id", "material_id", name="uq_sm"),)
+
+
+class Solution(Base):
+    """一次求解结果。trace_json 保存完整可追溯链路：化验版本、干湿基换算、
+    质量守恒合成、率值计算、求解状态与冲突诊断。"""
+    __tablename__ = "solution"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scenario_id: Mapped[int] = mapped_column(ForeignKey("scenario.id"))
+    profile: Mapped[str] = mapped_column(String(32), default="base")  # base / rain
+    mode: Mapped[str] = mapped_column(String(32))     # min_cost / target_center / max_cheap
+    status: Mapped[str] = mapped_column(String(32))   # feasible / infeasible / failed
+    cost_dry_t: Mapped[float | None] = mapped_column(Float, nullable=True)  # 元/吨干生料
+    cost_wet_t: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    im: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mix_json: Mapped[str] = mapped_column(Text, default="{}")
+    trace_json: Mapped[str] = mapped_column(Text, default="{}")
+    conflict_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
