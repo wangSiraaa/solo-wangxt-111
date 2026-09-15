@@ -14,3 +14,10 @@
 .inrange { color: var(--good); font-weight: 600; }
 .outrange { color: var(--bad); font-weight: 600; }
 .up { color: var(--warn); font-weight: 600; }
+.badge.self { color: var(--accent); border-color: var(--accent); }
+.manage-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+button.danger { border-color: var(--bad); color: #ffb4b2; }
+.history-box {
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+  margin-bottom: 12px; max-height: 340px; overflow-y: auto;
+}

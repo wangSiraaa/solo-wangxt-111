@@ -1,16 +1,9 @@
-"""HTTP 链路集成测试：以 SQLite 覆盖数据库，验证四个场景的端到端行为。"""
-import os
-import tempfile
-
+"""HTTP 链路集成测试：验证四个内置场景的端到端行为。"""
 import pytest
 
-_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_tmp.close()
-os.environ["BATCH_DATABASE_URL"] = f"sqlite:///{_tmp.name}"
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app.main import app  # noqa: E402
+from app.main import app
 
 
 @pytest.fixture(scope="module")

@@ -1,11 +1,58 @@
 <div class="panel">
-  <h2 style="margin-top:0">配比试算场景（虚构工艺边界）</h2>
+  <h2 style="margin-top:0; display:flex; justify-content:space-between; align-items:center;">
+    配比试算场景（虚构工艺边界）
+    <button class="primary" (click)="openCreate()">＋ 新建自定义场景</button>
+  </h2>
   <div class="scenario-buttons">
     @for (s of scenarios; track s.id) {
-      <button [class.primary]="s.id===selectedId" (click)="select(s.id)">{{ s.name }}</button>
+      <button [class.primary]="s.id===selectedId" (click)="select(s.id)">
+        {{ s.name }}
+        <span class="badge" [class.self]="s.built_in===false">{{ s.built_in ? '内置' : '自建' }}</span>
+      </button>
     }
   </div>
   @if (scenario) {
+    <div class="manage-row">
+      @if (scenario.built_in) {
+        <span class="muted">内置演示场景不可修改或删除；可新建自定义场景研究新矿点。</span>
+      } @else {
+        <button (click)="openEdit()">编辑此场景</button>
+        <button class="danger" (click)="deleteCurrent()">删除此场景</button>
+      }
+      <button (click)="loadHistory()">{{ historyOpen ? '收起历史解' : '查看历史解（追溯化验版本）' }}</button>
+    </div>
+
+    @if (historyOpen) {
+      <div class="history-box">
+        @if (history.length === 0) { <span class="muted">该场景暂无历史求解。</span> }
+        <table>
+          <thead>
+            <tr><th>#</th><th>时间</th><th>剖面</th><th>方案</th><th>状态</th>
+                <th>干基成本</th><th>KH</th><th>SM</th><th>IM</th><th>快照化验版本</th></tr>
+          </thead>
+          <tbody>
+            @for (h of history; track h.solution_id) {
+              <tr>
+                <td>{{ h.solution_id }}</td>
+                <td class="muted">{{ (h.created_at || '').replace('T',' ').slice(0,19) }}</td>
+                <td>{{ h.profile === 'rain' ? '雨季' : '基线' }}</td>
+                <td>{{ modeLabel(h.mode) }}</td>
+                <td>
+                  <span class="badge" [class.good]="h.status==='feasible'"
+                        [class.bad]="h.status==='infeasible'">{{ h.status }}</span>
+                </td>
+                <td>{{ h.cost_dry_t !== null ? (h.cost_dry_t | number:'1.2-2') : '—' }}</td>
+                <td>{{ h.kh !== null ? (h.kh | number:'1.3-3') : '—' }}</td>
+                <td>{{ h.sm !== null ? (h.sm | number:'1.2-2') : '—' }}</td>
+                <td>{{ h.im !== null ? (h.im | number:'1.2-2') : '—' }}</td>
+                <td class="mono" style="font-size:11px">{{ snapshotAssays(h) }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    }
+
     <p class="muted" style="white-space:pre-line">{{ scenario.description }}</p>
     <div class="targets">
       <span>目标 KH <b>{{ scenario.targets.kh[0] }}–{{ scenario.targets.kh[1] }}</b></span>
@@ -142,4 +189,10 @@
   @for (s of feasible(current); track s.solution_id) {
     <app-mix-result [sol]="s" [scenario]="scenario ?? null"></app-mix-result>
   }
+}
+
+
+@if (editorOpen) {
+  <app-scenario-editor [editing]="editorTarget" (saved)="onSaved($event)"
+                       (cancelled)="closeEditor()"></app-scenario-editor>
 }

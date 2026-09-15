@@ -71,6 +71,24 @@
 
 历史结果可通过 `GET /api/scenarios/{id}/solutions` 与 `GET /api/solutions/{id}` 回溯。
 
+## 自定义场景（研发自建虚构边界）
+
+「＋ 新建自定义场景」支持：选择参与原料、名称与说明、KH/SM/IM 目标区间、有害组分上限、
+分母地板、每原料最低掺量/场景上限/廉价标记，以及可选的雨季含水率覆盖与雨季附加成本。
+
+- **持久化**：保存后与内置场景完全同构，可执行旱季/雨季求解、看三种方案与冲突诊断，
+  并从场景页「查看历史解」面板追溯每次求解（含快照化验版本号/ID）。
+- **校验规则（前后端双重；服务端任何错误都在写库前返回，不落半成品）**：
+  名称必填且**同名拒绝**；至少两种原料；原料编码必须存在且具有**生效化验与生效成本**；
+  生效化验的必需氧化物不得缺测；率值下限严格小于上限且落在物理合理区间；
+  有害上限、分母地板为正；含水率覆盖 ∈ [0,100%)、附加成本非负；
+  最低掺量/场景上限 ∈ [0,100]%，最低 ≤ min(场景上限, 可用量上限)；
+  **最低掺量之和 ≤ 100%**。错误按**字段名**返回（如 `materials[FA].min_pct`、
+  `rain_overrides.FA`、`materials.min_sum`），表单逐字段展示。
+- **内置保护**：S1–S4 标记 `built_in=true`，修改返回 403、删除返回 403，界面不显示编辑/删除入口。
+- **化验版本快照**：切换某原料的生效化验后，**旧解仍引用并显示旧化验版本**，
+  新求解使用新版本；历史面板与每个 trace 的 `assay_versions` 都可核对差异。
+
 ## 运行方式
 
 ### 方式一：Docker Compose（PostgreSQL + 后端 + 前端/nginx）
@@ -112,6 +130,8 @@ node smoke.cjs                            # Playwright 端到端冒烟（需先�
 | `POST /api/materials/{code}/assays` · `.../activate` | 新增/切换生效化验版本（字段留空即 NULL 缺测） |
 | `PUT /api/materials/{code}/availability` | 设置可用量配比上限（-1 不限） |
 | `GET /api/scenarios` · `POST /api/scenarios/{id}/solve?profile=base|rain` | 场景列表 / 求解 |
+| `POST /api/scenarios` · `PUT /api/scenarios/{id}` · `DELETE /api/scenarios/{id}` | 自建场景 CRUD（内置场景 403；非法输入按字段返回 422 且不写库） |
+| `GET /api/materials/{code}/availability` | 可用量配比上限 |
 | `POST /api/manual-blend` | 手工配比即时合成（支持含水率覆盖与附加成本） |
 | `GET /api/scenarios/{id}/solutions` · `GET /api/solutions/{id}` | 历史结果追溯 |
 

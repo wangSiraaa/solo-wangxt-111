@@ -23,12 +23,32 @@ export interface ScenarioMaterial {
 
 export interface Scenario {
   id: number; name: string; description: string;
+  built_in?: boolean; created_at?: string;
   targets: { kh: [number, number]; sm: [number, number]; im: [number, number] };
   hazards: { mgo_max: number; so3_max: number; alkali_eq_max: number; cl_max: number };
   denom_floor: number;
   rain_overrides: Record<string, number>;
   rain_extra_cost: Record<string, number>;
   materials: ScenarioMaterial[];
+}
+
+export interface ScenarioMaterialInput {
+  material_code: string; min_pct: number; max_pct: number | null; preferred_cheap: boolean;
+}
+
+export interface ScenarioInput {
+  name: string; description: string;
+  kh_min: number; kh_max: number; sm_min: number; sm_max: number;
+  im_min: number; im_max: number;
+  mgo_max: number; so3_max: number; alkali_eq_max: number; cl_max: number;
+  denom_floor: number;
+  rain_overrides: Record<string, number>;
+  rain_extra_cost: Record<string, number>;
+  materials: ScenarioMaterialInput[];
+}
+
+export interface AvailabilityInfo {
+  material_id: number; max_fraction_pct: number; supply_note: string;
 }
 
 export interface Conflict {
@@ -66,9 +86,11 @@ export interface TraceBody {
 }
 
 export interface SolutionDto {
-  solution_id: number; mode: string; status: string;
+  solution_id: number; scenario_id?: number; profile?: string;
+  mode: string; status: string;
   cost_dry_t: number | null; cost_wet_t: number | null;
   kh: number | null; sm: number | null; im: number | null;
+  created_at?: string | null;
   mix: Record<string, number>; conflicts: Conflict[];
   trace: {
     provenance?: {
@@ -126,6 +148,22 @@ export class ApiService {
   }
 
   scenarios(): Observable<Scenario[]> { return this.http.get<Scenario[]>('/api/scenarios'); }
+
+  createScenario(body: ScenarioInput): Observable<Scenario> {
+    return this.http.post<Scenario>('/api/scenarios', body);
+  }
+
+  updateScenario(id: number, body: ScenarioInput): Observable<Scenario> {
+    return this.http.put<Scenario>(`/api/scenarios/${id}`, body);
+  }
+
+  deleteScenario(id: number): Observable<unknown> {
+    return this.http.delete(`/api/scenarios/${id}`);
+  }
+
+  availability(code: string): Observable<AvailabilityInfo | null> {
+    return this.http.get<AvailabilityInfo | null>(`/api/materials/${code}/availability`);
+  }
 
   solve(id: number, profile: 'base' | 'rain'): Observable<SolveResponse> {
     return this.http.post<SolveResponse>(`/api/scenarios/${id}/solve?profile=${profile}`, {});

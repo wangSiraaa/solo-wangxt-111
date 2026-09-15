@@ -96,6 +96,8 @@ class Scenario(Base):
     name: Mapped[str] = mapped_column(String(128))
     description: Mapped[str] = mapped_column(Text, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # True=内置 S1-S4（虚构演示边界），不可修改/删除；False=研发自建场景
+    built_in: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # 率值目标区间（虚构工艺边界，仅用于离线研究）

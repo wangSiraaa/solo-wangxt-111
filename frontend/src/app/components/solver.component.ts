@@ -5,11 +5,12 @@ import {
 } from '../api.service';
 import { MixResultComponent } from './mix-result.component';
 import { ConflictsComponent } from './conflicts.component';
+import { ScenarioEditorComponent } from './scenario-editor.component';
 
 @Component({
   selector: 'app-solver',
   standalone: true,
-  imports: [DecimalPipe, MixResultComponent, ConflictsComponent],
+  imports: [DecimalPipe, MixResultComponent, ConflictsComponent, ScenarioEditorComponent],
   templateUrl: './solver.component.html',
   styleUrl: './solver.component.scss',
 })
@@ -21,14 +22,27 @@ export class SolverComponent implements OnInit {
   base: SolveResponse | null = null;
   rain: SolveResponse | null = null;
   activeProfile: 'base' | 'rain' = 'base';
+  editorOpen = false;
+  editorTarget: Scenario | null = null;
+  history: SolutionDto[] = [];
+  historyOpen = false;
 
   constructor(private api: ApiService) {}
 
   ngOnInit() {
+    this.loadScenarios(true);
+  }
+
+  loadScenarios(autoselectFirst = false, preferredId?: number) {
     this.api.scenarios().subscribe(ss => {
+      const existed = this.scenarios.find(s => s.id === this.selectedId);
       this.scenarios = ss;
-      this.selectedId = ss[0]?.id ?? 1;
-      this.run('base');
+      if (preferredId && ss.some(s => s.id === preferredId)) {
+        this.selectedId = preferredId;
+      } else if (autoselectFirst || !existed) {
+        this.selectedId = ss.find(s => s.id === this.selectedId)?.id ?? ss[0]?.id ?? 1;
+      }
+      if (preferredId || existed || autoselectFirst) this.reload();
     });
   }
 
@@ -45,8 +59,14 @@ export class SolverComponent implements OnInit {
   }
 
   select(id: number) {
+    if (id === this.selectedId) return;
     this.selectedId = id;
+    this.reload();
+  }
+
+  reload() {
     this.base = null; this.rain = null; this.error = '';
+    this.history = []; this.historyOpen = false;
     this.run('base');
   }
 
@@ -64,6 +84,33 @@ export class SolverComponent implements OnInit {
         this.loading = false;
       },
     });
+  }
+
+  openCreate() { this.editorTarget = null; this.editorOpen = true; }
+  openEdit() { this.editorTarget = this.scenario ?? null; this.editorOpen = true; }
+  closeEditor() { this.editorOpen = false; this.editorTarget = null; }
+
+  onSaved(s: Scenario) {
+    this.editorOpen = false; this.editorTarget = null;
+    this.loadScenarios(false, s.id);
+    this.selectedId = s.id;
+    this.reload();
+  }
+
+  deleteCurrent() {
+    const s = this.scenario;
+    if (!s || s.built_in) return;
+    if (!confirm(`确定删除自定义场景「${s.name}」及其全部历史解？此操作不可恢复。`)) return;
+    this.api.deleteScenario(s.id).subscribe(() => {
+      this.loadScenarios(true);
+    });
+  }
+
+  loadHistory() {
+    this.historyOpen = !this.historyOpen;
+    if (this.historyOpen && !this.history.length) {
+      this.api.solutions(this.selectedId).subscribe(rows => this.history = rows);
+    }
   }
 
   feasible(resp: SolveResponse | null): SolutionDto[] {
@@ -98,7 +145,7 @@ export class SolverComponent implements OnInit {
 
   modeLabel(mode: string): string {
     return ({ min_cost: '💰 最低成本', target_center: '🎯 指标居中',
-              max_cheap: '🏷 廉价最大化' } as Record<string, string>)[mode] ?? mode;
+              max_cheap: '🏷 廉价最大化', diagnosis: '🚫 冲突诊断' } as Record<string, string>)[mode] ?? mode;
   }
 
   deltaCost(b?: SolutionDto, r?: SolutionDto): number {
@@ -120,4 +167,13 @@ export class SolverComponent implements OnInit {
   inKh(v?: number | null) { return v != null && v >= this.scenario!.targets.kh[0] && v <= this.scenario!.targets.kh[1]; }
   inSm(v?: number | null) { return v != null && v >= this.scenario!.targets.sm[0] && v <= this.scenario!.targets.sm[1]; }
   inIm(v?: number | null) { return v != null && v >= this.scenario!.targets.im[0] && v <= this.scenario!.targets.im[1]; }
+
+  /** 从历史解 trace 中取快照化验版本（旧解保留旧版本，不会随当前生效版本改变）。 */
+  snapshotAssays(h: SolutionDto): string {
+    const av = h.trace?.provenance?.assay_versions ?? {};
+    const entries = Object.values(av).slice(0, 3)
+      .map(v => `${v.material}:${v.assay_version}#${v.assay_id}`);
+    const more = Object.keys(av).length > 3 ? ` +${Object.keys(av).length - 3}` : '';
+    return entries.join('，') + more;
+  }
 }

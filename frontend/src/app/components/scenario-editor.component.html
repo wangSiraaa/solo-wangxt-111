@@ -1,0 +1,142 @@
+<div class="modal-backdrop" (click)="cancel()">
+  <div class="modal" (click)="$event.stopPropagation()">
+    <h2 style="margin-top:0">{{ editing ? '编辑自定义场景' : '＋ 新建自定义场景' }}</h2>
+    <p class="muted" style="margin-top:-6px">
+      全部边界为研发自建的<b>虚构工艺研究条件</b>，不构成生产指令。提交时服务端再次校验，非法不落库。
+    </p>
+
+    <div class="form-grid">
+      <label class="span2">场景名称（必填，唯一）
+        <input [(ngModel)]="name" maxlength="128" placeholder="例如：新矿点 B 雨季研究"
+               [class.bad]="!!serverErrors['name']">
+        @if (serverErrors['name']) { <span class="fld-err">{{ serverErrors['name'] }}</span> }
+      </label>
+      <label class="span2">说明
+        <input [(ngModel)]="description" placeholder="研究目的、矿点、假设条件…">
+      </label>
+
+      <fieldset>
+        <legend>KH 石灰饱和系数</legend>
+        <div class="range-line">
+          <input type="number" step="0.01" [(ngModel)]="khMin"> <span>–</span>
+          <input type="number" step="0.01" [(ngModel)]="khMax">
+        </div>
+        @if (serverErrors['kh_min']) { <span class="fld-err">{{ serverErrors['kh_min'] }}</span> }
+      </fieldset>
+      <fieldset>
+        <legend>SM 硅率</legend>
+        <div class="range-line">
+          <input type="number" step="0.05" [(ngModel)]="smMin"> <span>–</span>
+          <input type="number" step="0.05" [(ngModel)]="smMax">
+        </div>
+        @if (serverErrors['sm_min']) { <span class="fld-err">{{ serverErrors['sm_min'] }}</span> }
+      </fieldset>
+      <fieldset>
+        <legend>IM 铝率</legend>
+        <div class="range-line">
+          <input type="number" step="0.05" [(ngModel)]="imMin"> <span>–</span>
+          <input type="number" step="0.05" [(ngModel)]="imMax">
+        </div>
+        @if (serverErrors['im_min']) { <span class="fld-err">{{ serverErrors['im_min'] }}</span> }
+      </fieldset>
+
+      <fieldset>
+        <legend>有害组分上限 %</legend>
+        <div class="hazard-grid">
+          <label>MgO <input type="number" step="0.1" [(ngModel)]="mgoMax"></label>
+          <label>SO₃ <input type="number" step="0.05" [(ngModel)]="so3Max"></label>
+          <label>碱当量 <input type="number" step="0.05" [(ngModel)]="alkaliMax"></label>
+          <label>Cl⁻ <input type="number" step="0.001" [(ngModel)]="clMax"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>分母保护地板 %</legend>
+        <input type="number" step="0.01" [(ngModel)]="denomFloor">
+        <div class="muted" style="font-size:11px">Fe₂O₃ / Al₂O₃+Fe₂O₃ / 2.8SiO₂ 低于此值即拒绝</div>
+        @if (serverErrors['denom_floor']) { <span class="fld-err">{{ serverErrors['denom_floor'] }}</span> }
+      </fieldset>
+    </div>
+
+    <h3>参与原料（至少两种）</h3>
+    <div class="scroll-x mat-pick">
+      <table>
+        <thead>
+          <tr>
+            <th>选用</th><th>原料</th><th>生效化验</th><th>最低掺量%</th>
+            <th>场景上限%（空=100）</th><th>实际生效上限</th><th>廉价</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (r of rows; track r.code) {
+            <tr [class.sel]="r.selected">
+              <td><input type="checkbox" [(ngModel)]="r.selected"></td>
+              <td style="text-align:left">
+                {{ r.name }} <span class="muted mono">{{ r.code }}</span>
+                <div class="muted" style="font-size:11px">{{ r.category }} · {{ r.assayCount }} 个化验版本</div>
+              </td>
+              <td>
+                @if (r.activeAssayId !== null) {
+                  <span class="badge good">{{ r.activeAssay?.version }} #{{ r.activeAssayId }}</span>
+                  <div class="muted" style="font-size:11px">含水 {{ r.activeAssay?.moisture_pct }}%</div>
+                } @else { <span class="badge bad">无生效化验</span> }
+              </td>
+              <td><input type="number" step="0.5" min="0" max="100"
+                         [disabled]="!r.selected" [(ngModel)]="r.min" style="width:80px"></td>
+              <td><input type="number" step="0.5" min="0" max="100" placeholder="100"
+                         [disabled]="!r.selected" [(ngModel)]="r.max" style="width:90px"></td>
+              <td class="muted">{{ availText(r) }}<br>→ 生效 {{ effectiveMax(r) }}%</td>
+              <td><input type="checkbox" [disabled]="!r.selected" [(ngModel)]="r.cheap"></td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+    <div class="sum-line" [class.bad]="minSum > 100">
+      最低掺量之和：<b>{{ minSum | number:'1.1-1' }}%</b>（≤100%）· 已选 {{ selectedCount }} 种
+    </div>
+    @if (serverErrors['materials'] || serverErrors['materials.min_sum']) {
+      <span class="fld-err">{{ serverErrors['materials'] || serverErrors['materials.min_sum'] }}</span>
+    }
+
+    <h3>雨季配置（可选）</h3>
+    <div class="scroll-x">
+      <table>
+        <thead><tr><th>原料</th><th>雨季含水率覆盖%（空=用生效化验值）</th><th>雨季附加成本 元/湿吨</th></tr></thead>
+        <tbody>
+          @for (rr of rainRows; track rr.code) {
+            <tr>
+              <td style="text-align:left">{{ rr.name }} <span class="muted mono">{{ rr.code }}</span></td>
+              <td><input type="number" step="0.5" min="0" max="99.9" placeholder="基线"
+                         [(ngModel)]="rr.override" style="width:120px">
+                @if (serverErrors['rain_overrides.' + rr.code]) {
+                  <span class="fld-err">{{ serverErrors['rain_overrides.' + rr.code] }}</span>
+                }
+              </td>
+              <td><input type="number" step="0.5" min="0" [(ngModel)]="rr.extra" style="width:100px"></td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+
+    @if (formErrors.length) {
+      <div class="error-box">
+        <b>请先修正：</b>
+        <ul style="margin:4px 0 0 18px">
+          @for (e of formErrors; track e) { <li>{{ e }}</li> }
+        </ul>
+      </div>
+    }
+    @if (serverErrors['_']) { <div class="error-box">{{ serverErrors['_'] }}</div> }
+    @for (kv of otherServerErrors; track kv[0]) {
+      <div class="error-box">{{ kv[0] }}：{{ kv[1] }}</div>
+    }
+
+    <div class="btn-row">
+      <button class="primary" [disabled]="saving" (click)="save()">
+        {{ saving ? '保存中…' : (editing ? '保存修改' : '保存场景') }}
+      </button>
+      <button (click)="cancel()">取消</button>
+    </div>
+  </div>
+</div>

@@ -73,7 +73,7 @@ def seed(db: Session) -> None:
     def add_scenario(name, desc, target, items, rain=None, extra=None, hazards=None):
         hazards = hazards or {}
         sc = models.Scenario(
-            name=name, description=desc,
+            name=name, description=desc, built_in=True,
             kh_min=target["kh"][0], kh_max=target["kh"][1],
             sm_min=target["sm"][0], sm_max=target["sm"][1],
             im_min=target["im"][0], im_max=target["im"][1],

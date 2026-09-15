@@ -14,12 +14,14 @@ from .config import settings
 from .database import Base, engine, get_db
 from .seed import seed
 from .service import ANALYTES, run_scenario
+from .scenario_validation import ensure_schema, validate_scenario
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(engine)
     with Session(engine) as db:
+        ensure_schema(db)
         seed(db)
     yield
 
@@ -113,6 +115,18 @@ def add_cost(code: str, body: schemas.CostIn, activate: bool = Query(True),
     return c
 
 
+@app.get("/api/materials/{code}/availability")
+def get_availability(code: str, db: Session = Depends(get_db)):
+    m = db.scalar(select(models.Material).where(models.Material.code == code))
+    if not m:
+        raise HTTPException(404, "原料不存在")
+    av = m.availability
+    if av is None:
+        return {"material_id": m.id, "max_fraction_pct": -1.0, "supply_note": ""}
+    return {"material_id": m.id, "max_fraction_pct": av.max_fraction_pct,
+            "supply_note": av.supply_note}
+
+
 @app.put("/api/materials/{code}/availability")
 def set_availability(code: str, body: schemas.AvailabilityIn, db: Session = Depends(get_db)):
     m = db.scalar(select(models.Material).where(models.Material.code == code))
@@ -133,6 +147,7 @@ def set_availability(code: str, body: schemas.AvailabilityIn, db: Session = Depe
 def _scenario_dto(s: models.Scenario) -> dict:
     return {
         "id": s.id, "name": s.name, "description": s.description,
+        "built_in": s.built_in, "created_at": s.created_at.isoformat(),
         "targets": {"kh": [s.kh_min, s.kh_max], "sm": [s.sm_min, s.sm_max],
                     "im": [s.im_min, s.im_max]},
         "hazards": {"mgo_max": s.mgo_max, "so3_max": s.so3_max,
@@ -153,9 +168,80 @@ def list_scenarios(db: Session = Depends(get_db)):
     rows = db.scalars(
         select(models.Scenario).options(
             selectinload(models.Scenario.items).selectinload(models.ScenarioMaterial.material))
-        .order_by(models.Scenario.id)
+        .order_by(models.Scenario.built_in.desc(), models.Scenario.id)
     ).all()
     return [_scenario_dto(s) for s in rows]
+
+
+def _persist_scenario(db: Session, sc: models.Scenario, body: schemas.ScenarioIn,
+                      resolved: dict) -> None:
+    sc.name = body.name.strip()
+    sc.description = body.description
+    sc.kh_min, sc.kh_max = body.kh_min, body.kh_max
+    sc.sm_min, sc.sm_max = body.sm_min, body.sm_max
+    sc.im_min, sc.im_max = body.im_min, body.im_max
+    sc.mgo_max, sc.so3_max = body.mgo_max, body.so3_max
+    sc.alkali_eq_max, sc.cl_max = body.alkali_eq_max, body.cl_max
+    sc.denom_floor = body.denom_floor
+    sc.rain_overrides = json.dumps(body.rain_overrides or {}, ensure_ascii=False)
+    sc.rain_extra_cost_json = json.dumps(body.rain_extra_cost or {}, ensure_ascii=False)
+    # 更新时先删除旧原料行并 flush，避免唯一约束在同一 flush 内与新行冲突
+    if sc.id is not None:
+        db.query(models.ScenarioMaterial).filter_by(scenario_id=sc.id).delete()
+        db.flush()
+    sc.items = [
+        models.ScenarioMaterial(
+            material_id=resolved["materials"][it.material_code][0].id,
+            min_pct=it.min_pct, max_pct=it.max_pct,
+            preferred_cheap=it.preferred_cheap)
+        for it in body.materials
+    ]
+
+
+@app.post("/api/scenarios", status_code=201)
+def create_scenario(body: schemas.ScenarioIn, db: Session = Depends(get_db)):
+    """创建自定义场景。全部校验通过前不创建任何行（非法不落半成品）。"""
+    try:
+        resolved = validate_scenario(db, body)
+    except ValueError as e:
+        raise HTTPException(422, {"message": "场景校验失败", "fields": json.loads(str(e))})
+    sc = models.Scenario(built_in=False)
+    _persist_scenario(db, sc, body, resolved)
+    db.add(sc)
+    db.commit()
+    db.refresh(sc)
+    return _scenario_dto(sc)
+
+
+@app.put("/api/scenarios/{scenario_id}")
+def update_scenario(scenario_id: int, body: schemas.ScenarioIn, db: Session = Depends(get_db)):
+    sc = db.get(models.Scenario, scenario_id)
+    if not sc:
+        raise HTTPException(404, "场景不存在")
+    if sc.built_in:
+        raise HTTPException(403, "内置场景不可修改")
+    try:
+        resolved = validate_scenario(db, body, exclude_id=scenario_id)
+    except ValueError as e:
+        raise HTTPException(422, {"message": "场景校验失败", "fields": json.loads(str(e))})
+    _persist_scenario(db, sc, body, resolved)
+    db.commit()
+    db.refresh(sc)
+    return _scenario_dto(sc)
+
+
+@app.delete("/api/scenarios/{scenario_id}")
+def delete_scenario(scenario_id: int, db: Session = Depends(get_db)):
+    sc = db.get(models.Scenario, scenario_id)
+    if not sc:
+        raise HTTPException(404, "场景不存在")
+    if sc.built_in:
+        raise HTTPException(403, "内置场景不可删除")
+    db.query(models.ScenarioMaterial).filter_by(scenario_id=scenario_id).delete()
+    db.query(models.Solution).filter_by(scenario_id=scenario_id).delete()
+    db.delete(sc)
+    db.commit()
+    return {"status": "deleted", "id": scenario_id}
 
 
 # ---------------- 求解 ----------------
@@ -186,9 +272,11 @@ def solve_scenario(scenario_id: int, profile: str = Query("base", pattern="^(bas
 
 def _solution_dto(sol: models.Solution) -> dict:
     return {
-        "solution_id": sol.id, "mode": sol.mode, "status": sol.status,
+        "solution_id": sol.id, "scenario_id": sol.scenario_id,
+        "profile": sol.profile, "mode": sol.mode, "status": sol.status,
         "cost_dry_t": sol.cost_dry_t, "cost_wet_t": sol.cost_wet_t,
         "kh": sol.kh, "sm": sol.sm, "im": sol.im,
+        "created_at": sol.created_at.isoformat() if sol.created_at else None,
         "mix": json.loads(sol.mix_json or "{}"),
         "conflicts": json.loads(sol.conflict_json or "[]"),
         "trace": json.loads(sol.trace_json or "{}") if sol.trace_json else {},
@@ -212,11 +300,7 @@ def get_solution(solution_id: int, db: Session = Depends(get_db)):
     sol = db.get(models.Solution, solution_id)
     if not sol:
         raise HTTPException(404, "结果不存在")
-    dto = _solution_dto(sol)
-    dto["scenario_id"] = sol.scenario_id
-    dto["profile"] = sol.profile
-    dto["created_at"] = sol.created_at.isoformat()
-    return dto
+    return _solution_dto(sol)
 
 
 # ---------------- 手工配比试算（前端滑块直算，不经过优化器） ----------------
