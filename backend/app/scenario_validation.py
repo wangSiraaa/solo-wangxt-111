@@ -68,18 +68,19 @@ def validate_scenario(db: Session, body: ScenarioIn, exclude_id: int | None = No
         if not (lo < v <= hi):
             errors[field] = f"{label}必须在 ({lo}, {hi}]% 之间"
 
-    # 雨季覆盖 JSON
+    # 雨季配置数值合法性（编码归属在原料行解析后再校验）
     rain = body.rain_overrides or {}
     extra = body.rain_extra_cost or {}
     if not isinstance(rain, dict) or not isinstance(extra, dict):
         errors["rain_overrides"] = "雨季配置必须是 {原料编码: 数值}"
-    else:
-        for code, mst in rain.items():
-            if not isinstance(mst, (int, float)) or not (0.0 <= mst < 100.0):
-                errors[f"rain_overrides.{code}"] = f"{code} 雨季含水率必须在 [0,100)% 内"
-        for code, v in extra.items():
-            if not isinstance(v, (int, float)) or v < 0:
-                errors[f"rain_extra_cost.{code}"] = f"{code} 雨季附加成本不能为负"
+        rain = rain if isinstance(rain, dict) else {}
+        extra = extra if isinstance(extra, dict) else {}
+    for code, mst in rain.items():
+        if not isinstance(mst, (int, float)) or isinstance(mst, bool) or not (0.0 <= mst < 100.0):
+            errors[f"rain_overrides.{code}"] = f"{code} 雨季含水率必须在 [0,100)% 内"
+    for code, v in extra.items():
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
+            errors[f"rain_extra_cost.{code}"] = f"{code} 雨季附加成本不能为负"
 
     # 原料行
     if len(body.materials) < 2:
@@ -98,23 +99,22 @@ def validate_scenario(db: Session, body: ScenarioIn, exclude_id: int | None = No
         if m is None:
             errors[prefix] = f"原料编码 {item.material_code} 不存在"
             continue
+        # 化验与成本双缺失时使用各自独立的字段键，两个原因都必须保留、可定位
         if m.active_assay_id is None:
-            errors[prefix] = f"{item.material_code} 没有生效化验版本"
+            errors[f"{prefix}.assay"] = f"{item.material_code} 没有生效化验版本"
         if m.active_cost_id is None:
-            errors[prefix] = f"{item.material_code} 没有生效成本"
+            errors[f"{prefix}.cost"] = f"{item.material_code} 没有生效成本"
         assay = db.get(models.Assay, m.active_assay_id) if m.active_assay_id else None
         if assay is not None:
             missing = [a for a in ANALYTES if getattr(assay, a) is None]
             if missing:
-                errors[prefix] = f"{item.material_code} 生效化验缺测 {missing}，不得入场景"
+                errors[f"{prefix}.assay"] = (
+                    f"{item.material_code} 生效化验缺测 {missing}，不得入场景")
             if not (0.0 <= assay.moisture_pct < 100.0):
-                errors[prefix] = f"{item.material_code} 含水率非法"
-            if item.material_code in rain and rain[item.material_code] < assay.moisture_pct:
-                # 允许等于/更高；更低也允许（季节假设不同），这里只警告级别，不拦截
-                pass
+                errors[f"{prefix}.assay"] = f"{item.material_code} 含水率非法"
         cost = db.get(models.Cost, m.active_cost_id) if m.active_cost_id else None
         if cost is not None and cost.price_wet_t < 0:
-            errors[prefix] = f"{item.material_code} 到厂价不能为负"
+            errors[f"{prefix}.cost"] = f"{item.material_code} 到厂价不能为负"
 
         mn = item.min_pct
         mx = item.max_pct
@@ -132,6 +132,16 @@ def validate_scenario(db: Session, body: ScenarioIn, exclude_id: int | None = No
                 f"最低掺量 {mn}% 高于可用量上限 {avail_max}%")
         min_sum += mn
         resolved[item.material_code] = (m, assay, cost, mn, eff_max)
+
+    # 雨季配置的编码必须属于本次已选原料；未知编码按具体字段拒绝，不允许“旁路”保存
+    for code in rain:
+        if code not in seen:
+            errors[f"rain_overrides.{code}"] = (
+                f"雨季含水率覆盖的原料编码 {code} 不在本次参与原料列表中")
+    for code in extra:
+        if code not in seen:
+            errors[f"rain_extra_cost.{code}"] = (
+                f"雨季附加成本的原料编码 {code} 不在本次参与原料列表中")
 
     if min_sum > 100.0 + 1e-9:
         errors["materials.min_sum"] = (

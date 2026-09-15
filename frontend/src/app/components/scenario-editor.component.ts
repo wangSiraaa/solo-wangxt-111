@@ -109,11 +109,29 @@ export class ScenarioEditorComponent implements OnInit {
       'name', 'kh_min', 'sm_min', 'im_min', 'denom_floor', 'mgo_max', 'so3_max',
       'alkali_eq_max', 'cl_max', 'materials', 'materials.min_sum', '_',
     ]);
-    return Object.entries(this.serverErrors)
-      .filter(([k]) => !known.has(k) && !k.startsWith('rain_overrides.'));
+    return Object.entries(this.serverErrors).filter(([k]) =>
+      !known.has(k) && !k.startsWith('rain_overrides.')
+      && !k.startsWith('rain_extra_cost.') && !k.startsWith('materials['));
   }
 
   get selectedCount(): number { return this.rows.filter(r => r.selected).length; }
+
+  get selectedRows(): MatRow[] { return this.rows.filter(r => r.selected); }
+
+  isSelected(code: string): boolean {
+    return this.rows.find(r => r.code === code)?.selected ?? false;
+  }
+
+  matError(code: string): string[] {
+    return Object.entries(this.serverErrors)
+      .filter(([k]) => k.startsWith(`materials[${code}]`))
+      .map(([, v]) => v);
+  }
+
+  get rainErrors(): Array<[string, string]> {
+    return Object.entries(this.serverErrors)
+      .filter(([k]) => k.startsWith('rain_overrides.') || k.startsWith('rain_extra_cost.'));
+  }
 
   availText(r: MatRow): string {
     return r.availabilityMax >= 0 ? `可供上限 ${r.availabilityMax}%` : '可供量不限';
@@ -142,8 +160,9 @@ export class ScenarioEditorComponent implements OnInit {
     }
     if (this.selectedCount < 2) errs.push('至少选择两种参与原料');
     if (this.minSum > 100 + 1e-9) errs.push(`最低掺量之和 ${this.minSum.toFixed(1)}% 超过 100%`);
+    // 化验/成本是否存在等引用完整性由服务端判定，错误按 .assay/.cost 分列回显，
+    // 避免客户端用单一提示覆盖两类原因
     for (const r of this.rows.filter(x => x.selected)) {
-      if (r.activeAssayId === null) errs.push(`${r.name}（${r.code}）没有生效化验`);
       if (r.min < 0 || r.min > 100) errs.push(`${r.code} 最低掺量非法`);
       if (r.max !== null && (r.max < 0 || r.max > 100 || r.min > r.max)) {
         errs.push(`${r.code} 场景上限非法或低于最低掺量`);
@@ -152,7 +171,7 @@ export class ScenarioEditorComponent implements OnInit {
         errs.push(`${r.code} 最低掺量高于可供上限 ${r.availabilityMax}%`);
       }
     }
-    for (const rr of this.rainRows) {
+    for (const rr of this.rainRows.filter(x => this.isSelected(x.code))) {
       if (rr.override !== null && !(rr.override >= 0 && rr.override < 100)) {
         errs.push(`${rr.code} 雨季含水率须在 [0,100)% 内`);
       }
@@ -165,6 +184,7 @@ export class ScenarioEditorComponent implements OnInit {
   save() {
     this.serverErrors = {};
     if (!this.validateClient()) return;
+    const selectedCodes = new Set(this.rows.filter(r => r.selected).map(r => r.code));
     const body: ScenarioInput = {
       name: this.name.trim(),
       description: this.description,
@@ -174,10 +194,13 @@ export class ScenarioEditorComponent implements OnInit {
       mgo_max: this.mgoMax, so3_max: this.so3Max,
       alkali_eq_max: this.alkaliMax, cl_max: this.clMax,
       denom_floor: this.denomFloor,
+      // 只提交已选原料的雨季配置，杜绝未知编码
       rain_overrides: Object.fromEntries(
-        this.rainRows.filter(r => r.override !== null).map(r => [r.code, r.override!])),
+        this.rainRows.filter(r => r.override !== null && selectedCodes.has(r.code))
+          .map(r => [r.code, r.override!])),
       rain_extra_cost: Object.fromEntries(
-        this.rainRows.filter(r => r.extra > 0).map(r => [r.code, r.extra])),
+        this.rainRows.filter(r => r.extra > 0 && selectedCodes.has(r.code))
+          .map(r => [r.code, r.extra])),
       materials: this.rows.filter(r => r.selected).map(r => ({
         material_code: r.code, min_pct: r.min,
         max_pct: r.max, preferred_cheap: r.cheap,

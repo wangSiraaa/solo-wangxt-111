@@ -123,10 +123,68 @@ def test_material_without_assay_rejected_and_no_half_writes(client):
                          "max_pct": None, "preferred_cheap": False}
     r = client.post("/api/scenarios", json=p)
     assert r.status_code == 422
-    assert "materials[NOASSAY]" in r.json()["detail"]["fields"]
+    fields = r.json()["detail"]["fields"]
+    # 双缺失：化验与成本两类原因分别保留、可定位，互不覆盖
+    assert "materials[NOASSAY].assay" in fields
+    assert "materials[NOASSAY].cost" in fields
+    assert "化验" in fields["materials[NOASSAY].assay"]
+    assert "成本" in fields["materials[NOASSAY].cost"]
     after = client.get("/api/scenarios").json()
     assert len(after) == before  # 不落半成品
     assert all(s["name"] != "缺化验原料" for s in after)
+
+
+def test_material_without_cost_only_reports_cost(client):
+    # 有生效化验但无成本：只报 cost，不应误伤 assay
+    client.post("/api/materials", json={"code": "NOCOST", "name": "无成本料", "category": "测试"})
+    assay = {
+        "version": "A1", "moisture_pct": 3.0, "lab_note": "t",
+        "cao": 50.0, "sio2": 5.0, "al2o3": 1.5, "fe2o3": 0.6,
+        "mgo": 1.0, "so3": 0.1, "k2o": 0.2, "na2o": 0.05, "cl": 0.005, "loi": 40.0,
+    }
+    assert client.post("/api/materials/NOCOST/assays", json=assay).status_code == 200
+    p = base_payload(name="缺成本原料")
+    p["materials"][2] = {"material_code": "NOCOST", "min_pct": 0.0,
+                         "max_pct": None, "preferred_cheap": False}
+    r = client.post("/api/scenarios", json=p)
+    assert r.status_code == 422
+    fields = r.json()["detail"]["fields"]
+    assert "materials[NOCOST].cost" in fields
+    assert "materials[NOCOST].assay" not in fields
+
+
+def test_unknown_rain_override_code_rejected_and_not_persisted(client):
+    before = len(client.get("/api/scenarios").json())
+    p = base_payload(name="雨季未知含水率编码")
+    p["rain_overrides"] = {"FA": 26.0, "GHOST_R2": 11.0}
+    r = client.post("/api/scenarios", json=p)
+    assert r.status_code == 422
+    fields = r.json()["detail"]["fields"]
+    assert "rain_overrides.GHOST_R2" in fields
+    assert "不在本次参与原料列表中" in fields["rain_overrides.GHOST_R2"]
+    assert len(client.get("/api/scenarios").json()) == before  # 场景数不变
+
+
+def test_unknown_rain_extra_cost_code_rejected_and_not_persisted(client):
+    before = len(client.get("/api/scenarios").json())
+    p = base_payload(name="雨季未知附加成本编码")
+    p["rain_extra_cost"] = {"GHOST_R2": 5.0}
+    r = client.post("/api/scenarios", json=p)
+    assert r.status_code == 422
+    fields = r.json()["detail"]["fields"]
+    assert "rain_extra_cost.GHOST_R2" in fields
+    assert len(client.get("/api/scenarios").json()) == before
+
+
+def test_unknown_rain_code_rejected_on_update(client):
+    sid = test_create_custom_scenario_and_persist(client)
+    p = base_payload(name=f"更新带未知雨季码-{next(_seq)}")
+    p["rain_overrides"] = {"GHOST_R2": 9.0}
+    r = client.put(f"/api/scenarios/{sid}", json=p)
+    assert r.status_code == 422
+    assert "rain_overrides.GHOST_R2" in r.json()["detail"]["fields"]
+    # 原场景未被破坏，仍可求解
+    assert client.post(f"/api/scenarios/{sid}/solve").json()["status"] == "feasible"
 
 
 def test_unknown_code_and_duplicate_material(client):
@@ -172,6 +230,8 @@ def test_custom_conflict_scenario_shows_specific_conflicts(client):
         name="自定义强配冲突",
         kh_min=0.90, kh_max=0.96, sm_min=2.5, sm_max=2.9, im_min=1.2, im_max=1.7,
         alkali_eq_max=0.6, cl_max=0.015)
+    p["rain_overrides"] = {}
+    p["rain_extra_cost"] = {}
     p["materials"] = [
         {"material_code": "LS_L", "min_pct": 35.0, "max_pct": None, "preferred_cheap": True},
         {"material_code": "CG", "min_pct": 15.0, "max_pct": None, "preferred_cheap": True},
