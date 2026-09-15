@@ -71,6 +71,37 @@
 
 历史结果可通过 `GET /api/scenarios/{id}/solutions` 与 `GET /api/solutions/{id}` 回溯。
 
+## 并行试验分支与三方合并
+
+两名研发可从**任一已发布修订**创建多个命名分支并行试验：
+
+- `POST /scenarios/{id}/branches`：从已发布修订复制为命名分支草稿（`kind=branch`）；
+  分支独立 `revision_no/lock_version`，保存带 `revision_no + lock_version`，
+  两个浏览器同时保存同一分支只有一个成功（另一个 409）；
+- **三方合并**（base = 两分支共同来源发布版）：
+  - KH/SM/IM、有害上限、地板、说明、雨季覆盖/附加成本按标量/map 逐字段三方比较；
+  - 原料掺量（min/max/cheap）、增删按原料逐字段比较；
+  - 仅一方改动 → 自动采用；两方改成同值 → 自动；两方不同值 →
+    **可定位冲突，不静默选边**；一方删/另一方改同一原料、两方新增但设置不同同样冲突；
+  - 任一方钉住的 `assay_id/cost_id` 已失效 → 硬冲突（`pinned_ref`）；
+  - 无冲突 → 单事务生成 `status=merged` 候选修订（记录 base/双父/字段决议审计），
+    **候选不可求解**，乐观锁发布后才冻结；有冲突 → 生成 open `MergeAttempt`，
+    带 `attempt_id + resolutions` 可逐项决议后重试，幂等键回放同一候选；
+- 合并/发布失败或服务重启不留半版本（单事务；`recover()` 修复指针，
+  open 合并尝试持久化可继续）；回滚为新草稿不破坏旧冲突诊断与历史解；
+- 求解、历史解、化验快照继续绑定最终发布修订；内置 S1–S4 的分支/合并/预览接口一律 403。
+
+Angular 时间线新增「类型/分支、来源/合并（base + rA + rB）、合并候选」列与分支栏；
+合并向导支持选 A/B/base、自动差异预览、逐冲突三选一决议、生成候选并发布。
+
+| 方法/路径 | 说明 |
+|---|---|
+| `POST /api/scenarios/{id}/branches` | 从已发布修订创建命名分支 |
+| `POST /api/scenarios/{id}/merge-preview` | 不落库的三方差异/冲突预览 |
+| `POST /api/scenarios/{id}/merge` | 合并：生成候选或返回 open 尝试（支持决议重试、幂等键） |
+| `GET /api/scenarios/{id}/merge-attempts` | 合并尝试审计 |
+| `PUT /api/scenarios/{id}/draft` | 分支保存（body 带 `revision_no/lock_version`） |
+
 ## 自定义场景与修订版（草稿—发布冻结—可重放审计）
 
 研发对同一新矿点持续调边界时，历史解**绝不被后续修改覆盖**：

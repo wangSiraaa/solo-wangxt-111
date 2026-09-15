@@ -1,0 +1,103 @@
+<div class="modal-backdrop" (click)="cancel()">
+  <div class="modal" (click)="$event.stopPropagation()">
+    <h2 style="margin-top:0">⑂ 三方合并（base = 共同来源发布版）</h2>
+    <p class="muted" style="margin-top:-6px">
+      互不重叠的改动自动合并；同字段不同值、删改同一原料或钉住化验/成本失效必须显式决议，
+      系统不会静默选边。合并只产生候选修订，发布后才参与求解。
+    </p>
+
+    <div class="pick-row">
+      <label>分支 A
+        <select [(ngModel)]="aNo" (ngModelChange)="onSelect()">
+          <option [ngValue]="null" disabled>选择分支…</option>
+          @for (r of branchable; track r.revision_id) {
+            <option [ngValue]="r.revision_no">r{{ r.revision_no }} · {{ r.branch_name }}</option>
+          }
+        </select>
+      </label>
+      <label>分支 B
+        <select [(ngModel)]="bNo" (ngModelChange)="onSelect()">
+          <option [ngValue]="null" disabled>选择分支…</option>
+          @for (r of branchable; track r.revision_id) {
+            @if (r.revision_no !== aNo) {
+              <option [ngValue]="r.revision_no">r{{ r.revision_no }} · {{ r.branch_name }}</option>
+            }
+          }
+        </select>
+      </label>
+      <label>共同 base（已发布修订）
+        <select [(ngModel)]="baseNo" (ngModelChange)="onSelect()">
+          <option [ngValue]="null" disabled>选择 base…</option>
+          @for (r of baseOptions; track r.revision_id) {
+            <option [ngValue]="r.revision_no">r{{ r.revision_no }}</option>
+          }
+        </select>
+      </label>
+      <button [disabled]="!aNo || !bNo || !baseNo || busy" (click)="runPreview()">预览差异</button>
+    </div>
+
+    @if (error) { <div class="error-box">{{ error }}</div> }
+
+    @if (preview) {
+      <h3>自动决议（{{ autoMerged.length }} 项）</h3>
+      <div class="scroll-x auto-box">
+        <table>
+          <thead><tr><th>字段</th><th>base</th><th>分支 A</th><th>分支 B</th><th>采用</th><th>来源</th></tr></thead>
+          <tbody>
+            @for (d of autoMerged; track d.field) {
+              <tr>
+                <td style="text-align:left">{{ d.label }}</td>
+                <td>{{ fmt(d.base) }}</td>
+                <td>{{ fmt(d.a) }}</td>
+                <td>{{ fmt(d.b) }}</td>
+                <td class="good">{{ fmt(d.chosen) }}</td>
+                <td>
+                  <span class="badge" [class.good]="d.resolution!=='manual'"
+                        [class.warn]="d.resolution==='manual'">
+                    {{ { 'auto-a': '取 A', 'auto-b': '取 B', 'auto-same': '相同', manual: '人工' }[d.resolution] || d.resolution }}
+                  </span>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+
+      @if (conflicts.length) {
+        <h3 class="conflict-h">必须决议的冲突（{{ conflicts.length }} 项）</h3>
+        <div class="conflict-list">
+          @for (c of conflicts; track c.field) {
+            <div class="conflict-item">
+              <div class="conf-head">
+                <b>{{ c.label || c.field }}</b>
+                <span class="mono fld">{{ c.field }}</span>
+              </div>
+              <div class="conflict-opts">
+                <button [class.sel]="resolutions[c.field]===c.base"
+                        (click)="chooseResolution(c.field,'base')">
+                  用 base：{{ fmt(c.base) }}</button>
+                <button [class.sel]="resolutions[c.field]===c.a"
+                        (click)="chooseResolution(c.field,'a')">
+                  用 A：{{ fmt(c.a) }}</button>
+                <button [class.sel]="resolutions[c.field]===c.b"
+                        (click)="chooseResolution(c.field,'b')">
+                  用 B：{{ fmt(c.b) }}</button>
+              </div>
+            </div>
+          }
+        </div>
+      }
+
+      <div class="btn-row">
+        @if (conflicts.length) {
+          <span class="muted">决议 {{ resolvedCount }}/{{ conflicts.length }} 项后可合并</span>
+        }
+        <button class="primary" [disabled]="busy || (conflicts.length>0 && !allConflictsResolved)"
+                (click)="commitMerge()">
+          {{ conflicts.length ? '按决议生成合并候选' : '生成合并候选' }}
+        </button>
+        <button (click)="cancel()">取消</button>
+      </div>
+    }
+  </div>
+</div>

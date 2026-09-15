@@ -98,10 +98,17 @@ def revision_dto(db: Session, rev: models.ScenarioRevision) -> dict:
         "scenario_id": rev.scenario_id,
         "revision_no": rev.revision_no,
         "status": rev.status,
+        "kind": rev.kind or "linear",
+        "branch_name": rev.branch_name,
         "lock_version": rev.lock_version,
         "created_from_revision_no": rev.created_from_revision_no,
         "created_at": rev.created_at.isoformat() if rev.created_at else None,
         "published_at": rev.published_at.isoformat() if rev.published_at else None,
+        "merge": None if rev.merge_base_no is None else {
+            "base_no": rev.merge_base_no,
+            "a_no": rev.merge_parent_a_no, "b_no": rev.merge_parent_b_no,
+            "decisions": json.loads(rev.merge_decisions_json or "[]"),
+        },
         "solutions": sol_count,
         "payload": p,
     }
@@ -172,9 +179,11 @@ def _guard_custom(sc: models.Scenario) -> None:
 
 
 def _draft(db: Session, sc: models.Scenario) -> models.ScenarioRevision | None:
+    """线性（无名）草稿。命名分支由 kind='branch' 单独查询。"""
     return db.scalar(select(models.ScenarioRevision).where(
         models.ScenarioRevision.scenario_id == sc.id,
-        models.ScenarioRevision.status == "draft"))
+        models.ScenarioRevision.status == "draft",
+        models.ScenarioRevision.kind == "linear"))
 
 
 def _next_no(db: Session, sc: models.Scenario) -> int:
@@ -264,9 +273,18 @@ def _apply_to_scenario(db: Session, sc: models.Scenario,
 def scenario_brief(db: Session, sc: models.Scenario) -> dict:
     pub = sc.published_revision_id and db.get(models.ScenarioRevision,
                                               sc.published_revision_id)
+    # linear 无名单草稿（兼容旧入口）；分支草稿见时间线
     d = db.scalar(select(models.ScenarioRevision).where(
         models.ScenarioRevision.scenario_id == sc.id,
-        models.ScenarioRevision.status == "draft"))
+        models.ScenarioRevision.status == "draft",
+        models.ScenarioRevision.kind == "linear"))
+    branches = db.scalars(select(models.ScenarioRevision).where(
+        models.ScenarioRevision.scenario_id == sc.id,
+        models.ScenarioRevision.status == "draft",
+        models.ScenarioRevision.kind == "branch")).all()
+    merged = db.scalars(select(models.ScenarioRevision).where(
+        models.ScenarioRevision.scenario_id == sc.id,
+        models.ScenarioRevision.status == "merged")).all()
     return {
         "id": sc.id, "name": sc.name, "built_in": sc.built_in,
         "published_revision_no": pub.revision_no if pub else None,
@@ -274,82 +292,136 @@ def scenario_brief(db: Session, sc: models.Scenario) -> dict:
         "draft_revision_no": d.revision_no if d else None,
         "draft_revision_id": d.id if d else None,
         "draft_lock_version": d.lock_version if d else None,
+        "branch_drafts": [{"revision_no": b.revision_no, "revision_id": b.id,
+                           "branch_name": b.branch_name,
+                           "lock_version": b.lock_version,
+                           "created_from_revision_no": b.created_from_revision_no}
+                          for b in branches],
+        "merge_candidates": [{"revision_no": b.revision_no, "revision_id": b.id,
+                              "lock_version": b.lock_version,
+                              "merge": {"base_no": b.merge_base_no,
+                                        "a_no": b.merge_parent_a_no,
+                                        "b_no": b.merge_parent_b_no}}
+                             for b in merged],
     }
 
 
-# ---------------- 草稿 ----------------
+# ---------------- 草稿（linear 与 branch） ----------------
+
+def _editable_draft(db: Session, sc: models.Scenario, revision_no: int | None
+                    ) -> models.ScenarioRevision:
+    if revision_no is not None:
+        rev = db.scalar(select(models.ScenarioRevision).where(
+            models.ScenarioRevision.scenario_id == sc.id,
+            models.ScenarioRevision.revision_no == revision_no))
+        if rev is None:
+            raise RevError(404, {"message": f"修订 r{revision_no} 不存在"})
+        if rev.status not in ("draft", "merged"):
+            raise RevError(409, {"message": f"r{revision_no} 已发布冻结，不可修改"})
+        return rev
+    # 无 revision_no：仅允许 linear 草稿
+    d = _draft(db, sc)
+    if d is None:
+        raise RevError(404, {"message": "该场景没有草稿"})
+    return d
+
 
 def save_draft(db: Session, scenario_id: int, payload: dict, expected_lock: int | None,
-               source_revision_no: int | None, idem_key: str | None) -> dict:
+               source_revision_no: int | None, idem_key: str | None,
+               revision_no: int | None = None,
+               branch_name: str | None = None) -> dict:
     sc = _get_scenario(db, scenario_id)
     _guard_custom(sc)
     fp = fingerprint(payload)
     if (cached := replay_idempotent(db, idem_key, fp)) is not None:
         return cached
 
-    draft = _draft(db, sc)
-    if draft is not None:
-        # 更新既有草稿：乐观并发，两个浏览器只有一个成功
+    # 更新既有草稿/候选：必须指定 revision_no 与 lock_version
+    if revision_no is not None:
+        existing = _editable_draft(db, sc, revision_no)
         if expected_lock is None:
             raise RevError(428, {"message": "必须携带草稿的 lock_version"})
         result = db.execute(
             update(models.ScenarioRevision)
-            .where(models.ScenarioRevision.id == draft.id,
+            .where(models.ScenarioRevision.id == existing.id,
                    models.ScenarioRevision.lock_version == expected_lock,
-                   models.ScenarioRevision.status == "draft")
+                   models.ScenarioRevision.status.in_(["draft", "merged"]))
             .values(payload_json=json.dumps(payload, ensure_ascii=False),
                     lock_version=models.ScenarioRevision.lock_version + 1))
         if result.rowcount != 1:
             db.rollback()
             raise RevError(409, {"message": "草稿已被其他会话修改，请刷新后基于最新版本编辑",
-                                 "current_lock_version": draft.lock_version})
-        db.refresh(draft)
-        rev = draft
-        created = False
+                                 "current_lock_version": existing.lock_version})
+        db.refresh(existing)
+        _idempotency(db, idem_key, "save_draft", fp, existing.id, 200,
+                     revision_dto(db, existing))
+        db.commit()
+        return {"replay": False, "created": False, **revision_dto(db, existing)}
+
+    # 新建草稿（必须来自已发布修订）
+    src_no = source_revision_no
+    if src_no is None:
+        raise RevError(422, {"message": "新建草稿必须指定来源已发布修订 source_revision_no"})
+    src = db.scalar(select(models.ScenarioRevision).where(
+        models.ScenarioRevision.scenario_id == sc.id,
+        models.ScenarioRevision.revision_no == src_no))
+    if src is None:
+        raise RevError(404, {"message": f"源修订版 r{src_no} 不存在"})
+    if src.status != "published":
+        raise RevError(422, {"message": "只能从已发布修订创建草稿/分支"})
+
+    is_branch = branch_name is not None
+    name = None
+    if is_branch:
+        name = branch_name.strip()
+        if not name:
+            raise RevError(422, {"message": "分支名称必填"})
+        dup = db.scalar(select(models.ScenarioRevision).where(
+            models.ScenarioRevision.scenario_id == sc.id,
+            models.ScenarioRevision.branch_name == name,
+            models.ScenarioRevision.status.in_(["draft", "merged"])))
+        if dup is not None:
+            raise RevError(409, {"message": f"分支名「{name}」已存在"})
     else:
-        if expected_lock is not None:
-            raise RevError(409, {"message": "草稿不存在或已被发布，乐观版本失效"})
-        src_no = source_revision_no
-        if src_no is not None:
-            src = db.scalar(select(models.ScenarioRevision).where(
-                models.ScenarioRevision.scenario_id == sc.id,
-                models.ScenarioRevision.revision_no == src_no))
-            if src is None:
-                raise RevError(404, {"message": f"源修订版 r{src_no} 不存在"})
-        rev = models.ScenarioRevision(
-            scenario_id=sc.id, revision_no=_next_no(db, sc), status="draft",
-            payload_json=json.dumps(payload, ensure_ascii=False), lock_version=1,
-            created_from_revision_no=src_no)
-        db.add(rev); db.flush()
-        created = True
+        if _draft(db, sc) is not None:
+            raise RevError(409, {"message": "线性草稿已存在；请新建命名分支并行试验"})
 
+    rev = models.ScenarioRevision(
+        scenario_id=sc.id, revision_no=_next_no(db, sc), status="draft",
+        kind="branch" if is_branch else "linear",
+        branch_name=name,
+        payload_json=json.dumps(payload, ensure_ascii=False), lock_version=1,
+        created_from_revision_no=src_no)
+    db.add(rev); db.flush()
     dto = revision_dto(db, rev)
-    _idempotency(db, idem_key, "save_draft", fp, rev.id, 200, dto)
+    _idempotency(db, idem_key, "save_draft", fp, rev.id, 201, dto)
     db.commit()
-    return {"replay": False, "created": created, **revision_dto(db, rev)}
+    return {"replay": False, "created": True, **dto}
 
 
-def publish_draft(db: Session, scenario_id: int, expected_lock: int,
-                  idem_key: str | None) -> dict:
+def publish_revision(db: Session, scenario_id: int, revision_no: int,
+                     expected_lock: int, idem_key: str | None) -> dict:
+    """发布指定草稿/合并候选（乐观锁）。已发布修订不可再发布。"""
     sc = _get_scenario(db, scenario_id)
     _guard_custom(sc)
-    draft = _draft(db, sc)
+    draft = db.scalar(select(models.ScenarioRevision).where(
+        models.ScenarioRevision.scenario_id == sc.id,
+        models.ScenarioRevision.revision_no == revision_no))
     if draft is None:
-        # 首请求已成功发布并消除草稿：按幂等键直接回放同一修订结果
         cached = replay_by_key(db, idem_key)
         if cached is not None:
             return cached
-        raise RevError(404, {"message": "该场景没有待发布的草稿"})
+        raise RevError(404, {"message": f"修订 r{revision_no} 不存在"})
+    if draft.status not in ("draft", "merged"):
+        cached = replay_by_key(db, idem_key)
+        if cached is not None:
+            return cached
+        raise RevError(409, {"message": f"r{revision_no} 已发布，不可重复发布"})
     payload = json.loads(draft.payload_json)
-    # 幂等键按草稿内容绑定（不含 lock_version：成功发布后 lock 会自增，
-    # 重试仍应视为同一发布请求）；同键不同草稿内容才判为冲突
-    fp = fingerprint({**payload, "_action": "publish"})
+    fp = fingerprint({**payload, "_action": "publish", "_rev": revision_no})
     if (cached := replay_idempotent(db, idem_key, fp)) is not None:
         return cached
 
-    # 发布前再次执行与建单完全相同的全量校验（钉住的引用必须仍有效）
-    if payload is None:
-        raise RevError(404, {"message": "该场景没有待发布的草稿"})
     from .scenario_validation import validate_payload
     try:
         validate_payload(db, payload, exclude_id=sc.id)
@@ -361,7 +433,7 @@ def publish_draft(db: Session, scenario_id: int, expected_lock: int,
         update(models.ScenarioRevision)
         .where(models.ScenarioRevision.id == draft.id,
                models.ScenarioRevision.lock_version == expected_lock,
-               models.ScenarioRevision.status == "draft")
+               models.ScenarioRevision.status.in_(["draft", "merged"]))
         .values(status="published", lock_version=models.ScenarioRevision.lock_version + 1,
                 published_at=datetime.utcnow()))
     if result.rowcount != 1:
@@ -369,6 +441,7 @@ def publish_draft(db: Session, scenario_id: int, expected_lock: int,
         raise RevError(409, {"message": "发布冲突：草稿已被其他会话修改或发布",
                              "current_lock_version": draft.lock_version})
     db.refresh(draft)
+    # 其余未发布草稿/候选保持原样（审计链完整）
     _apply_to_scenario(db, sc, draft, payload)
     dto = revision_dto(db, draft)
     _idempotency(db, idem_key, "publish", fp, draft.id, 200, dto)
@@ -377,23 +450,37 @@ def publish_draft(db: Session, scenario_id: int, expected_lock: int,
 
 
 def rollback_as_draft(db: Session, scenario_id: int, source_revision_no: int,
-                      idem_key: str | None) -> dict:
-    """把指定旧发布版本（默认当前发布版）复制为新草稿，审计链完整保留。"""
+                      idem_key: str | None, branch_name: str | None = None) -> dict:
+    """把指定旧发布版本复制为新草稿（可命名分支），审计链完整保留。
+    线性草稿互斥；命名分支可与其它分支并存。"""
     sc = _get_scenario(db, scenario_id)
     _guard_custom(sc)
-    if _draft(db, sc) is not None:
-        raise RevError(409, {"message": "已有未发布草稿，请先发布或放弃"})
+    if branch_name is None and _draft(db, sc) is not None:
+        raise RevError(409, {"message": "已有线性草稿，请先发布/放弃或改用命名分支"})
+    if branch_name is not None:
+        name = branch_name.strip()
+        if not name:
+            raise RevError(422, {"message": "分支名称必填"})
+        dup = db.scalar(select(models.ScenarioRevision).where(
+            models.ScenarioRevision.scenario_id == sc.id,
+            models.ScenarioRevision.branch_name == name,
+            models.ScenarioRevision.status.in_(["draft", "merged"])))
+        if dup is not None:
+            raise RevError(409, {"message": f"分支名「{name}」已存在"})
     src = db.scalar(select(models.ScenarioRevision).where(
         models.ScenarioRevision.scenario_id == sc.id,
         models.ScenarioRevision.revision_no == source_revision_no))
     if src is None or src.status != "published":
         raise RevError(404, {"message": f"已发布修订版 r{source_revision_no} 不存在"})
     payload = json.loads(src.payload_json)
-    fp = fingerprint({**payload, "_action": "rollback", "_src": source_revision_no})
+    fp = fingerprint({**payload, "_action": "rollback", "_src": source_revision_no,
+                      "_branch": branch_name})
     if (cached := replay_idempotent(db, idem_key, fp)) is not None:
         return cached
     rev = models.ScenarioRevision(
         scenario_id=sc.id, revision_no=_next_no(db, sc), status="draft",
+        kind="branch" if branch_name else "linear",
+        branch_name=branch_name,
         payload_json=src.payload_json, lock_version=1,
         created_from_revision_no=source_revision_no)
     db.add(rev); db.flush()
@@ -403,12 +490,25 @@ def rollback_as_draft(db: Session, scenario_id: int, source_revision_no: int,
     return {"replay": False, **dto}
 
 
-def discard_draft(db: Session, scenario_id: int) -> None:
+def discard_draft(db: Session, scenario_id: int, revision_no: int | None = None) -> None:
     sc = _get_scenario(db, scenario_id)
     _guard_custom(sc)
-    draft = _draft(db, sc)
-    if draft is None:
-        raise RevError(404, {"message": "该场景没有草稿"})
+    if revision_no is not None:
+        draft = db.scalar(select(models.ScenarioRevision).where(
+            models.ScenarioRevision.scenario_id == sc.id,
+            models.ScenarioRevision.revision_no == revision_no))
+        if draft is None:
+            raise RevError(404, {"message": f"修订 r{revision_no} 不存在"})
+        if draft.status not in ("draft", "merged"):
+            raise RevError(409, {"message": "已发布修订不可删除"})
+    else:
+        draft = _draft(db, sc)
+        if draft is None:
+            raise RevError(404, {"message": "该场景没有线性草稿"})
+    # 关闭关联的 open 合并尝试
+    db.query(models.MergeAttempt).filter(
+        models.MergeAttempt.scenario_id == sc.id,
+        models.MergeAttempt.status == "open").delete(synchronize_session=False)
     db.delete(draft)
     db.commit()
 

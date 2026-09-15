@@ -53,7 +53,9 @@ export class ScenarioEditorComponent implements OnInit {
   get title(): string {
     if (this.mode === 'create') return '＋ 新建自定义场景（保存即发布 rev1）';
     if (this.sourceRevision && this.sourceRevision.status === 'draft') {
-      return `编辑草稿 r${this.sourceRevision.revision_no}`;
+      const bn = this.sourceRevision.branch_name;
+      return bn ? `编辑分支草稿 r${this.sourceRevision.revision_no} · ${bn}`
+                : `编辑草稿 r${this.sourceRevision.revision_no}`;
     }
     const src = this.sourceRevision ? `（复制自 r${this.sourceRevision.revision_no}）` : '';
     return `为「${this.scenario?.name ?? ''}」创建修订草稿 ${src}`;
@@ -192,8 +194,10 @@ export class ScenarioEditorComponent implements OnInit {
   }
 
   private buildBody(): ScenarioInput & { lock_version?: number | null;
-                                        source_revision_no?: number | null } {
+                                        source_revision_no?: number | null;
+                                        revision_no?: number | null } {
     const selectedCodes = new Set(this.rows.filter(r => r.selected).map(r => r.code));
+    const src = this.sourceRevision;
     return {
       name: this.name.trim(), description: this.description,
       kh_min: this.khMin, kh_max: this.khMax, sm_min: this.smMin, sm_max: this.smMax,
@@ -215,10 +219,11 @@ export class ScenarioEditorComponent implements OnInit {
         cost_id: this.mode === 'draft' ? r.activeCostId : null,
       })),
       lock_version: this.mode === 'draft' ? this.lockVersion : null,
-      source_revision_no: this.mode === 'draft' && this.sourceRevision
-        ? (this.sourceRevision.status === 'draft' ? null
-           : this.sourceRevision.revision_no)
-        : null,
+      // 编辑既有草稿/候选/分支：按修订号更新；只有首次从发布版分叉才带来源号
+      revision_no: this.mode === 'draft' && src && src.status !== 'published'
+        ? src.revision_no : null,
+      source_revision_no: this.mode === 'draft' && src && src.status === 'published'
+        ? src.revision_no : null,
     };
   }
 

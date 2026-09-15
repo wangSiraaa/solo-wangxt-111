@@ -1,0 +1,24 @@
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(5, 9, 15, .72);
+  z-index: 110; display: flex; justify-content: center; align-items: flex-start;
+  overflow-y: auto; padding: 30px 16px;
+}
+.modal {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 22px 26px; width: min(1000px, 100%);
+}
+.pick-row { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; margin: 12px 0; }
+.pick-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+select { background: var(--bg); color: var(--txt); border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; }
+h3 { margin: 16px 0 8px; font-size: 15px; }
+.conflict-h { color: var(--bad); }
+.auto-box { max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+.good { color: var(--good); font-weight: 600; }
+.conflict-list { display: flex; flex-direction: column; gap: 10px; }
+.conflict-item { border: 1px solid var(--bad); border-radius: 8px; padding: 10px 12px; background: rgba(239,83,80,.06); }
+.conflict-head { display: flex; gap: 10px; align-items: baseline; }
+.conf-head .fld { color: var(--muted); font-size: 11px; }
+.conflict-opts { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.conflict-opts button { padding: 5px 10px; font-size: 12px; }
+.conflict-opts button.sel { border-color: var(--good); color: var(--good); }
+.btn-row { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 16px; }

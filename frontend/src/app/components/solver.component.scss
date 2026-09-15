@@ -25,3 +25,7 @@ button.danger { border-color: var(--bad); color: #ffb4b2; }
 tr.draftrow { background: rgba(240,180,41,.07); }
 .ops button { padding: 3px 8px; font-size: 12px; margin: 1px; }
 .diff-list div { font-size: 12px; line-height: 1.7; }
+.branch-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 8px; }
+.branch-name { width: 200px; }
+button.merge-btn { border-color: var(--accent); color: var(--accent); }
+.badge.merge { color: #d6b3ff; border-color: #b39ddb; }

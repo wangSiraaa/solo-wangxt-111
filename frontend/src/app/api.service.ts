@@ -42,15 +42,29 @@ export interface ScenarioMaterialInput {
   cost_id?: number | null;
 }
 
+export interface MergeDecision {
+  field: string; label: string; resolution: string;
+  base: unknown; a: unknown; b: unknown; chosen: unknown;
+}
+
+export interface MergeConflict {
+  field: string; label?: string; kind: string;
+  base: unknown; a: unknown; b: unknown;
+}
+
 export interface RevisionDto {
   revision_id: number;
   scenario_id: number;
   revision_no: number;
-  status: 'draft' | 'published';
+  status: 'draft' | 'merged' | 'published';
+  kind: 'linear' | 'branch';
+  branch_name: string | null;
   lock_version: number;
   created_from_revision_no: number | null;
   created_at: string | null;
   published_at: string | null;
+  merge?: { base_no: number; a_no: number; b_no: number;
+            decisions: MergeDecision[] } | null;
   solutions: number;
   payload: ScenarioInput & { materials: Array<ScenarioMaterialInput> };
   diff_from_published?: { changes: RevisionChange[]; change_count: number } | null;
@@ -58,6 +72,18 @@ export interface RevisionDto {
 
 export interface RevisionChange {
   field: string; label: string; old: unknown; new: unknown;
+}
+
+export interface MergePreview {
+  status: 'clean' | 'conflict' | 'merged';
+  auto?: MergeDecision[];
+  conflicts?: MergeConflict[];
+  attempt_id?: number;
+  base_no?: number; a_no?: number; b_no?: number;
+  revision_id?: number; revision_no?: number; lock_version?: number;
+  merge?: { base_no: number; a_no: number; b_no: number; auto: MergeDecision[] };
+  payload?: ScenarioInput;
+  validation_errors?: Record<string, string>;
 }
 
 export interface ScenarioInput {
@@ -191,7 +217,9 @@ export class ApiService {
   }
 
   saveDraft(id: number, body: ScenarioInput & { lock_version?: number | null;
-                                              source_revision_no?: number | null },
+                                              source_revision_no?: number | null;
+                                              revision_no?: number | null;
+                                              branch_name?: string | null },
             idemKey?: string): Observable<RevisionDto> {
     return this.http.put<RevisionDto>(`/api/scenarios/${id}/draft`, body,
       { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
@@ -211,8 +239,48 @@ export class ApiService {
       { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
   }
 
-  discardDraft(id: number): Observable<unknown> {
-    return this.http.delete(`/api/scenarios/${id}/draft`);
+  discardDraft(id: number, revisionNo?: number): Observable<unknown> {
+    const q = revisionNo !== undefined ? `?revision_no=${revisionNo}` : '';
+    return this.http.delete(`/api/scenarios/${id}/draft${q}`);
+  }
+
+  createBranch(id: number, sourceNo: number, branchName: string,
+               idemKey?: string): Observable<RevisionDto> {
+    return this.http.post<RevisionDto>(`/api/scenarios/${id}/branches`,
+      { source_revision_no: sourceNo, branch_name: branchName },
+      { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
+  }
+
+  mergePreview(id: number, base: number, a: number, b: number,
+               resolutions?: Record<string, unknown>): Observable<MergePreview> {
+    return this.http.post<MergePreview>(`/api/scenarios/${id}/merge-preview`,
+      { base, a, b, resolutions: resolutions ?? {} });
+  }
+
+  mergeBranches(id: number, body: {
+    a: number; b: number; base?: number; attempt_id?: number;
+    resolutions?: Record<string, unknown>;
+  }, idemKey?: string): Observable<MergePreview> {
+    return this.http.post<MergePreview>(`/api/scenarios/${id}/merge`, body,
+      { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
+  }
+
+  mergeAttempts(id: number): Observable<any[]> {
+    return this.http.get<any[]>(`/api/scenarios/${id}/merge-attempts`);
+  }
+
+  saveBranchDraft(id: number, revisionNo: number, lockVersion: number,
+                  body: ScenarioInput, idemKey?: string): Observable<RevisionDto> {
+    return this.http.put<RevisionDto>(`/api/scenarios/${id}/draft`,
+      { ...body, revision_no: revisionNo, lock_version: lockVersion },
+      { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
+  }
+
+  publishRevision(id: number, revisionNo: number, lockVersion: number,
+                  idemKey?: string): Observable<RevisionDto> {
+    return this.http.post<RevisionDto>(`/api/scenarios/${id}/publish`,
+      { revision_no: revisionNo, lock_version: lockVersion },
+      { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
   }
 
   static idemKey(): string {

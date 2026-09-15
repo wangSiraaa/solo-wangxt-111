@@ -44,6 +44,22 @@ def ensure_schema(db: Session) -> None:
             if "revision_no" not in cols:
                 conn.exec_driver_sql("ALTER TABLE solution ADD COLUMN revision_no INTEGER")
 
+    if "scenario_revision" in tables:
+        cols = {c["name"] for c in insp.get_columns("scenario_revision")}
+        adds = [
+            ("kind", "VARCHAR(16) DEFAULT 'linear'"),
+            ("branch_name", "VARCHAR(64)"),
+            ("merge_base_no", "INTEGER"),
+            ("merge_parent_a_no", "INTEGER"),
+            ("merge_parent_b_no", "INTEGER"),
+            ("merge_decisions_json", "TEXT"),
+        ]
+        with db.bind.begin() as conn:
+            for name, ddl in adds:
+                if name not in cols:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE scenario_revision ADD COLUMN {name} {ddl}")
+
 
 def _validate_parts(
     db: Session, *, name: str, kh_min: float, kh_max: float,

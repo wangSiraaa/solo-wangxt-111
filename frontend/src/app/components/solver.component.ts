@@ -1,16 +1,19 @@
 import { Component, OnInit } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import {
   ApiService, Scenario, SolutionDto, SolveResponse, RevisionDto,
 } from '../api.service';
 import { MixResultComponent } from './mix-result.component';
 import { ConflictsComponent } from './conflicts.component';
 import { ScenarioEditorComponent } from './scenario-editor.component';
+import { MergeWizardComponent } from './merge-wizard.component';
 
 @Component({
   selector: 'app-solver',
   standalone: true,
-  imports: [DecimalPipe, MixResultComponent, ConflictsComponent, ScenarioEditorComponent],
+  imports: [DecimalPipe, FormsModule, MixResultComponent, ConflictsComponent,
+            ScenarioEditorComponent, MergeWizardComponent],
   templateUrl: './solver.component.html',
   styleUrl: './solver.component.scss',
 })
@@ -26,10 +29,14 @@ export class SolverComponent implements OnInit {
   editorMode: 'create' | 'draft' = 'create';
   editorScenario: Scenario | null = null;
   editorSource: RevisionDto | null = null;
+  mergeOpen = false;
+  mergePreselectA: number | null = null;
   history: SolutionDto[] = [];
   historyOpen = false;
   timeline: RevisionDto[] = [];
   timelineOpen = false;
+  newBranchName = '';
+  newBranchSourceNo: number | null = null;
 
   constructor(private api: ApiService) {}
 
@@ -89,6 +96,80 @@ export class SolverComponent implements OnInit {
     this.editorScenario = null;
     this.editorSource = null;
     this.editorOpen = true;
+  }
+
+  // ---------------- 并行分支与合并 ----------------
+
+  get publishedRevisions(): RevisionDto[] {
+    return this.timeline.filter(r => r.status === 'published');
+  }
+  get branchDrafts(): RevisionDto[] {
+    return this.timeline.filter(r => r.status === 'draft' && r.kind === 'branch');
+  }
+
+  refreshTimeline(open = true): Promise<RevisionDto[]> {
+    return new Promise(resolve => {
+      this.api.revisions(this.selectedId).subscribe(rs => {
+        this.timeline = rs;
+        this.timelineOpen = open;
+        if (this.newBranchSourceNo === null) {
+          const pub = [...rs].reverse().find(r => r.status === 'published');
+          this.newBranchSourceNo = pub?.revision_no ?? null;
+        }
+        resolve(rs);
+      });
+    });
+  }
+
+  createBranchFromPublished(revNo: number) {
+    const name = (this.newBranchName || '').trim();
+    if (!name) { alert('请填写分支名称'); return; }
+    this.api.createBranch(this.selectedId, revNo, name, ApiService.idemKey()).subscribe({
+      next: () => {
+        this.newBranchName = '';
+        this.loadScenarios(false, this.selectedId);
+        this.refreshTimeline();
+      },
+      error: e => alert(e.error?.detail?.message ?? '创建分支失败'),
+    });
+  }
+
+  editBranch(rev: RevisionDto) {
+    if (rev.status === 'published') return;
+    this.editorMode = 'draft';
+    this.editorScenario = this.scenario ?? null;
+    this.editorSource = rev;
+    this.editorOpen = true;
+  }
+
+  openMerge(aNo: number | null = null) {
+    if (!this.timeline.length) {
+      this.api.revisions(this.selectedId).subscribe(rs => {
+        this.timeline = rs;
+        this.mergePreselectA = aNo;
+        this.mergeOpen = true;
+      });
+    } else {
+      this.mergePreselectA = aNo;
+      this.mergeOpen = true;
+    }
+  }
+
+  onMerged(candidateNo: number) {
+    this.mergeOpen = false;
+    this.loadScenarios(false, this.selectedId);
+    this.refreshTimeline();
+    // 直接打开候选发布确认
+    setTimeout(() => {
+      const cand = this.timeline.find(r => r.revision_no === candidateNo);
+      if (cand && confirm(`合并候选 r${candidateNo} 已生成。立即发布？`)) {
+        this.publishRevision(cand);
+      }
+    }, 400);
+  }
+
+  publishBranch(rev: RevisionDto) {
+    this.publishRevision(rev);
   }
 
   continueDraft() {
@@ -157,12 +238,20 @@ export class SolverComponent implements OnInit {
   loadTimeline() {
     this.timelineOpen = !this.timelineOpen;
     if (this.timelineOpen && !this.timeline.length) {
-      this.api.revisions(this.selectedId).subscribe(rs => this.timeline = rs);
+      this.api.revisions(this.selectedId).subscribe(rs => {
+        this.timeline = rs;
+        // 默认从当前发布版分叉
+        if (this.newBranchSourceNo === null) {
+          const pub = [...rs].reverse().find(r => r.status === 'published');
+          this.newBranchSourceNo = pub?.revision_no ?? null;
+        }
+      });
     }
   }
 
   publishRevision(rev: RevisionDto) {
-    this.api.publishDraft(this.selectedId, rev.lock_version, ApiService.idemKey()).subscribe({
+    this.api.publishRevision(this.selectedId, rev.revision_no, rev.lock_version,
+                              ApiService.idemKey()).subscribe({
       next: () => {
         this.timeline = [];
         this.loadScenarios(false, this.selectedId);
@@ -171,10 +260,11 @@ export class SolverComponent implements OnInit {
     });
   }
 
-  discardDraft() {
-    if (!confirm('放弃当前草稿？已发布版本与历史解不受影响。')) return;
-    this.api.discardDraft(this.selectedId).subscribe(() => {
-      this.timeline = []; this.loadScenarios(false, this.selectedId);
+  discardRevision(rev: RevisionDto) {
+    if (!confirm(`放弃 r${rev.revision_no}${rev.branch_name ? '（' + rev.branch_name + '）' : ''}？`)) return;
+    this.api.discardDraft(this.selectedId, rev.revision_no).subscribe({
+      next: () => { this.timeline = []; this.loadScenarios(false, this.selectedId); },
+      error: e => alert(e.error?.detail?.message ?? '放弃失败'),
     });
   }
 

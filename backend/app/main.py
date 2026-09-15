@@ -250,10 +250,11 @@ def scenario_revisions(scenario_id: int, db: Session = Depends(get_db)):
     if sc is None:
         raise HTTPException(404, "场景不存在")
     dtos = revs.list_timeline(db, sc)
-    pub_payload = json.loads(
-        db.get(models.ScenarioRevision, sc.published_revision_id).payload_json)         if sc.published_revision_id else None
+    pub_rev = db.get(models.ScenarioRevision, sc.published_revision_id) \
+        if sc.published_revision_id else None
+    pub_payload = json.loads(pub_rev.payload_json) if pub_rev else None
     for d in dtos:
-        if d["status"] == "draft" and pub_payload is not None:
+        if d["status"] in ("draft", "merged") and pub_payload is not None:
             d["diff_from_published"] = revs.diff_payloads(pub_payload, d["payload"])
     return dtos
 
@@ -274,6 +275,8 @@ def get_revision(scenario_id: int, revision_no: int, db: Session = Depends(get_d
 class DraftIn(schemas.ScenarioIn):
     lock_version: int | None = None
     source_revision_no: int | None = None
+    revision_no: int | None = None
+    branch_name: str | None = None
 
 
 @app.put("/api/scenarios/{scenario_id}/draft")
@@ -282,8 +285,10 @@ def save_draft(scenario_id: int, body: DraftIn, db: Session = Depends(get_db),
     try:
         payload = _resolve_pinned(db, _payload_from_body(body))
         validate_payload(db, payload, exclude_id=scenario_id)
-        out = revs.save_draft(db, scenario_id, payload, body.lock_version,
-                              body.source_revision_no, idempotency_key)
+        out = revs.save_draft(
+            db, scenario_id, payload, body.lock_version,
+            body.source_revision_no, idempotency_key,
+            revision_no=body.revision_no, branch_name=body.branch_name)
     except ValueError as e:
         raise HTTPException(422, {"message": "草稿校验失败", "fields": json.loads(str(e))})
     except revs.RevError as e:
@@ -291,12 +296,81 @@ def save_draft(scenario_id: int, body: DraftIn, db: Session = Depends(get_db),
     return out
 
 
+@app.post("/api/scenarios/{scenario_id}/branches", status_code=201)
+def create_branch(scenario_id: int, body: dict, db: Session = Depends(get_db),
+                  idempotency_key: str | None = Header(default=None)):
+    """从任一已发布修订创建命名分支（复制其 payload 为草稿）。"""
+    from . import merge_service as merge_svc
+    try:
+        src = int(body.get("source_revision_no"))
+        name = body.get("branch_name")
+        out = merge_svc.create_branch(db, scenario_id, src, name, idempotency_key)
+    except revs.RevError as e:
+        raise _rev_error(e)
+    return out
+
+
+@app.post("/api/scenarios/{scenario_id}/merge-preview")
+def merge_preview(scenario_id: int, body: dict, db: Session = Depends(get_db)):
+    """只计算三方差异与冲突，不持久化。"""
+    from . import merge_service as merge_svc
+    sc = db.get(models.Scenario, scenario_id)
+    if sc is None:
+        raise HTTPException(404, "场景不存在")
+    if sc.built_in:
+        raise HTTPException(403, "内置场景不可创建或合并分支")
+    try:
+        result = merge_svc.compute_merge(
+            db, sc, int(body["base"]), int(body["a"]), int(body["b"]),
+            body.get("resolutions") or {})
+    except revs.RevError as e:
+        raise _rev_error(e)
+    return {"status": "conflict" if result["conflicts"] else "clean",
+            "auto": result["auto"], "conflicts": result["conflicts"]}
+
+
+@app.post("/api/scenarios/{scenario_id}/merge")
+def merge_branches(scenario_id: int, body: dict, db: Session = Depends(get_db),
+                   idempotency_key: str | None = Header(default=None)):
+    """三方合并：无冲突生成 merged 候选；有冲突返回 open 尝试（可带决议重试）。"""
+    from . import merge_service as merge_svc
+    try:
+        out = merge_svc.merge_branches(db, scenario_id, body, idempotency_key)
+    except revs.RevError as e:
+        raise _rev_error(e)
+    return out
+
+
+@app.get("/api/scenarios/{scenario_id}/merge-attempts")
+def merge_attempts(scenario_id: int, db: Session = Depends(get_db)):
+    from . import merge_service as merge_svc
+    try:
+        return merge_svc.list_merge_attempts(db, scenario_id)
+    except revs.RevError as e:
+        raise _rev_error(e)
+
+
 @app.post("/api/scenarios/{scenario_id}/publish")
 def publish(scenario_id: int, body: dict, db: Session = Depends(get_db),
             idempotency_key: str | None = Header(default=None)):
     try:
-        out = revs.publish_draft(db, scenario_id, int(body.get("lock_version")),
-                                 idempotency_key)
+        rev_no = body.get("revision_no")
+        if rev_no is not None:
+            # 发布指定草稿/合并候选（分支或三方合并结果）
+            out = revs.publish_revision(db, scenario_id, int(rev_no),
+                                        int(body.get("lock_version")), idempotency_key)
+        else:
+            # 兼容旧入口：发布线性草稿（内置场景在服务层 403）
+            sc0 = db.get(models.Scenario, scenario_id)
+            if sc0 is None:
+                raise revs.RevError(404, {"message": "场景不存在"})
+            if sc0.built_in:
+                raise revs.RevError(403, {"message": "内置场景不可进入修订流程"})
+            lin = revs._draft(db, sc0)
+            if lin is None:
+                raise revs.RevError(404, {"message": "该场景没有待发布的草稿"})
+            out = revs.publish_revision(db, scenario_id, lin.revision_no,
+                                        int(body.get("lock_version")), idempotency_key)
     except ValueError as e:
         raise HTTPException(422, {"message": "发布校验失败", "fields": json.loads(str(e))})
     except revs.RevError as e:
@@ -315,16 +389,19 @@ def rollback_draft(scenario_id: int, body: dict, db: Session = Depends(get_db),
         if src_no is None and sc.published_revision_id:
             src_no = db.get(models.ScenarioRevision,
                             sc.published_revision_id).revision_no
-        out = revs.rollback_as_draft(db, scenario_id, int(src_no), idempotency_key)
+        out = revs.rollback_as_draft(
+            db, scenario_id, int(src_no), idempotency_key,
+            branch_name=body.get("branch_name"))
     except revs.RevError as e:
         raise _rev_error(e)
     return out
 
 
 @app.delete("/api/scenarios/{scenario_id}/draft")
-def discard_draft(scenario_id: int, db: Session = Depends(get_db)):
+def discard_draft(scenario_id: int, revision_no: int | None = Query(None),
+                  db: Session = Depends(get_db)):
     try:
-        revs.discard_draft(db, scenario_id)
+        revs.discard_draft(db, scenario_id, revision_no)
     except revs.RevError as e:
         raise _rev_error(e)
     return {"status": "discarded"}
@@ -347,6 +424,7 @@ def delete_scenario(scenario_id: int, db: Session = Depends(get_db)):
         models.RevisionRequest.revision_id.in_(
             select(models.ScenarioRevision.id).where(
                 models.ScenarioRevision.scenario_id == scenario_id))).delete(synchronize_session=False)
+    db.query(models.MergeAttempt).filter_by(scenario_id=scenario_id).delete()
     db.query(models.Solution).filter_by(scenario_id=scenario_id).delete()
     db.query(models.ScenarioMaterial).filter_by(scenario_id=scenario_id).delete()
     db.query(models.ScenarioRevision).filter_by(scenario_id=scenario_id).delete()

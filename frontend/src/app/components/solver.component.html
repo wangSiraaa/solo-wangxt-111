@@ -39,28 +39,60 @@
     </div>
 
     @if (timelineOpen) {
+      @if (!scenario.built_in) {
+        <div class="branch-bar">
+          <span>从发布版新建并行分支：</span>
+          <select [(ngModel)]="newBranchSourceNo">
+            @for (p of publishedRevisions; track p.revision_id) {
+              <option [ngValue]="p.revision_no">r{{ p.revision_no }}</option>
+            }
+          </select>
+          <input placeholder="分支名称，如 低碱方案" [(ngModel)]="newBranchName" class="branch-name">
+          <button [disabled]="!newBranchSourceNo || !newBranchName.trim()"
+                  (click)="createBranchFromPublished(newBranchSourceNo!)">＋ 创建分支</button>
+          <button class="merge-btn"
+                  [disabled]="branchDrafts.length < 2"
+                  (click)="openMerge(null)">⑂ 合并两个分支…</button>
+        </div>
+      }
       <div class="history-box">
         <table>
           <thead>
             <tr>
-              <th>修订</th><th>状态</th><th>来源</th><th>创建时间</th><th>发布时间</th>
+              <th>修订</th><th>类型/分支</th><th>状态</th><th>来源/合并</th><th>创建时间</th><th>发布时间</th>
               <th>解数</th><th>与发布版差异</th><th>操作</th>
             </tr>
           </thead>
           <tbody>
             @for (r of timeline; track r.revision_id) {
-              <tr [class.draftrow]="r.status==='draft'">
+              <tr [class.draftrow]="r.status!=='published'">
                 <td><b>r{{ r.revision_no }}</b></td>
                 <td>
-                  <span class="badge" [class.good]="r.status==='published'"
-                        [class.warn]="r.status==='draft'">{{ r.status === 'published' ? '已发布冻结' : '草稿' }}</span>
+                  @if (r.kind === 'branch') {
+                    <span class="badge self">⑂ {{ r.branch_name }}</span>
+                  } @else { <span class="muted">线性</span> }
                 </td>
-                <td>{{ r.created_from_revision_no ? '复制自 r' + r.created_from_revision_no : '—' }}</td>
+                <td>
+                  <span class="badge" [class.good]="r.status==='published'"
+                        [class.warn]="r.status==='draft'"
+                        [class.merge]="r.status==='merged'">
+                    {{ r.status === 'published' ? '已发布冻结' : r.status === 'merged' ? '合并候选' : '草稿' }}
+                  </span>
+                </td>
+                <td>
+                  @if (r.merge) {
+                    <span class="mono" style="font-size:11px">
+                      base r{{ r.merge.base_no }}<br>⑂ r{{ r.merge.a_no }} + r{{ r.merge.b_no }}
+                    </span>
+                  } @else {
+                    {{ r.created_from_revision_no ? '复制自 r' + r.created_from_revision_no : '—' }}
+                  }
+                </td>
                 <td class="muted">{{ fmtTime(r.created_at) }}</td>
                 <td class="muted">{{ fmtTime(r.published_at) }}</td>
                 <td>{{ r.solutions }}</td>
                 <td style="text-align:left;max-width:360px">
-                  @if (r.status === 'draft' && r.diff_from_published) {
+                  @if (r.status !== 'published' && r.diff_from_published) {
                     <details>
                       <summary>{{ r.diff_from_published.change_count }} 项变化</summary>
                       <div class="diff-list">
@@ -72,10 +104,15 @@
                   } @else { <span class="muted">—</span> }
                 </td>
                 <td class="ops">
-                  @if (r.status === 'draft' && !scenario.built_in) {
-                    <button (click)="continueDraftRevision(r)">继续编辑</button>
-                    <button (click)="publishRevision(r)">发布</button>
-                    <button class="danger" (click)="discardDraft()">放弃</button>
+                  @if ((r.status === 'draft' || r.status === 'merged') && !scenario.built_in) {
+                    <button (click)="editBranch(r)">编辑</button>
+                    <button class="primary" (click)="publishBranch(r)">
+                      {{ r.status === 'merged' ? '发布候选' : '发布' }}
+                    </button>
+                    <button class="danger" (click)="discardRevision(r)">放弃</button>
+                    @if (r.status === 'draft' && r.kind === 'branch') {
+                      <button (click)="openMerge(r.revision_no)">⑂ 合并</button>
+                    }
                   }
                   @if (r.status === 'published') {
                     <button (click)="replayRevision(r.revision_no)">重放求解</button>
@@ -267,4 +304,11 @@
                        [sourceRevision]="editorSource"
                        (saved)="onSaved($event)"
                        (cancelled)="closeEditor()"></app-scenario-editor>
+}
+
+@if (mergeOpen) {
+  <app-merge-wizard [scenarioId]="selectedId" [revisions]="timeline"
+                     [preselectA]="mergePreselectA"
+                     (merged)="onMerged($event)"
+                     (cancelled)="mergeOpen=false"></app-merge-wizard>
 }

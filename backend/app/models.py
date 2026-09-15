@@ -135,22 +135,33 @@ class Scenario(Base):
 class ScenarioRevision(Base):
     """场景修订版：草稿—发布冻结的不可变快照。
 
-    - 同一自定义场景最多一个 draft；只有 published 修订可求解。
+    - status: draft（未合并草稿）/ merged（三方合并候选，尚未发布）/ published（冻结）
+    - kind: linear（无名单分支）/ branch（命名并行分支）
+    - 每个场景至多一个 linear draft；branch draft 可任意多个；
+      merged 是合并产物，发布后转 published。
     - payload_json 钉住每个原料的 assay_id/cost_id，切换生效化验不影响旧修订。
-    - lock_version 为乐观并发版本；发布与草稿保存都必须携带期望值。
+    - lock_version 为乐观并发版本；分支保存、合并候选发布都必须携带期望值。
     """
     __tablename__ = "scenario_revision"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     scenario_id: Mapped[int] = mapped_column(ForeignKey("scenario.id"))
     revision_no: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft / published
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    kind: Mapped[str] = mapped_column(String(16), default="linear")  # linear / branch
+    branch_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     payload_json: Mapped[str] = mapped_column(Text)
     lock_version: Mapped[int] = mapped_column(Integer, default=1)
     created_from_revision_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     published_by: Mapped[str] = mapped_column(String(64), default="研发")
+    # 三方合并审计：base 修订号、两个父分支修订号（非合并为 NULL）
+    merge_base_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    merge_parent_a_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    merge_parent_b_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 字段级决议审计（JSON: [{field,label,resolution:auto|manual,base,a,b,chosen}]）
+    merge_decisions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     scenario: Mapped[Scenario] = relationship(
         foreign_keys=[scenario_id], back_populates="revisions")
@@ -163,12 +174,33 @@ class RevisionRequest(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    scope: Mapped[str] = mapped_column(String(32))       # create / save_draft / publish
+    scope: Mapped[str] = mapped_column(String(32))  # create/save_draft/publish/merge
     revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fingerprint: Mapped[str] = mapped_column(String(64))
     status_code: Mapped[int] = mapped_column(Integer)
     response_json: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MergeAttempt(Base):
+    """三方合并尝试的审计记录：冲突未解决时为 open，可继续追加决议；
+    合并成功生成候选修订后标记 resolved。服务重启后仍可继续处理。"""
+    __tablename__ = "merge_attempt"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scenario_id: Mapped[int] = mapped_column(ForeignKey("scenario.id"))
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open / resolved
+    base_no: Mapped[int] = mapped_column(Integer)
+    parent_a_no: Mapped[int] = mapped_column(Integer)
+    parent_b_no: Mapped[int] = mapped_column(Integer)
+    candidate_revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 最近一次合并结果：{auto:[...], conflicts:[{field,label,base,a,b}]}
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    # 已接受的人工决议：{field: chosen_value}
+    resolutions_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class ScenarioMaterial(Base):

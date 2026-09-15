@@ -180,7 +180,7 @@ def test_unknown_rain_code_rejected_on_draft(client):
     sid = test_create_custom_scenario_and_persist(client)
     p = base_payload(name=f"草稿未知雨季码-{next(_seq)}")
     p["rain_overrides"] = {"GHOST_R2": 9.0}
-    r = client.put(f"/api/scenarios/{sid}/draft", json=p)
+    r = client.put(f"/api/scenarios/{sid}/draft", json={**p, "source_revision_no": 1})
     assert r.status_code == 422
     assert "rain_overrides.GHOST_R2" in r.json()["detail"]["fields"]
     # 当前发布版未被破坏，仍可求解
@@ -276,19 +276,20 @@ def test_assay_version_snapshot_old_vs_new(client):
     assert r.status_code == 200
     new_assay_id = r.json()["id"]
 
-    # 新修订草稿钉住新化验版本；旧发布修订不被改变
+    # 新修订草稿（从 r1 分叉）自动钉住新生效化验；旧发布修订不被改变
     p = base_payload(name=f"换化验后的修订-{next(_seq)}")
-    draft = client.put(f"/api/scenarios/{sid}/draft", json=p)
+    draft = client.put(f"/api/scenarios/{sid}/draft", json={**p, "source_revision_no": 1})
     assert draft.status_code == 200, draft.text
     lock = draft.json()["lock_version"]
-    rev2_no = draft.json()["revision_no"]
-    pub = client.post(f"/api/scenarios/{sid}/publish", json={"lock_version": lock})
+    new_rev_no = draft.json()["revision_no"]
+    pub = client.post(f"/api/scenarios/{sid}/publish",
+                      json={"lock_version": lock, "revision_no": new_rev_no})
     assert pub.status_code == 200, pub.text
 
     # 新发布修订求解：引用新化验
     client.post(f"/api/scenarios/{sid}/solve?profile=base")
     hist = client.get(f"/api/scenarios/{sid}/solutions").json()
-    new_sols = [h for h in hist if h["revision_no"] == rev2_no]
+    new_sols = [h for h in hist if h["revision_no"] == new_rev_no]
     old_sols = [h for h in hist if h["revision_no"] == 1]
     assert new_sols and old_sols
     assert new_sols[0]["trace"]["provenance"]["assay_versions"]["LS_H"]["assay_id"] == new_assay_id
@@ -301,7 +302,7 @@ def test_assay_version_snapshot_old_vs_new(client):
     assert feas["trace"]["provenance"]["assay_versions"]["LS_H"]["assay_id"] == old_assay_id
     # 草稿不可求解
     client.put(f"/api/scenarios/{sid}/draft",
-               json=base_payload(name=f"临时草稿-{next(_seq)}"))
+               json={**base_payload(name=f"临时草稿-{next(_seq)}"), "source_revision_no": 2})
     draft_rev = client.get(f"/api/scenarios/{sid}/revisions").json()[0]
     assert draft_rev["status"] == "draft"
     assert client.post(f"/api/scenarios/{sid}/solve?revision_no={draft_rev['revision_no']}").status_code == 409
@@ -312,36 +313,38 @@ def test_optimistic_concurrency_two_editors(client):
     """两个浏览器基于同一草稿保存：只有一个成功（409 给后者）。"""
     sid = test_create_custom_scenario_and_persist(client)
     p = base_payload(name=f"并发草稿-{next(_seq)}")
-    d1 = client.put(f"/api/scenarios/{sid}/draft", json=p).json()
+    d1 = client.put(f"/api/scenarios/{sid}/draft", json={**p, "source_revision_no": 1}).json()
     lock = d1["lock_version"]
     # 浏览器 A 先保存成功
     p2 = base_payload(name=f"并发草稿A-{next(_seq)}")
+    rev_no = d1["revision_no"]
     r_ok = client.put(f"/api/scenarios/{sid}/draft",
-                      json={**p2, "lock_version": lock})
+                      json={**p2, "lock_version": lock, "revision_no": rev_no})
     assert r_ok.status_code == 200
     assert r_ok.json()["lock_version"] == lock + 1
     # 浏览器 B 用过期 lock 保存
     p3 = base_payload(name=f"并发草稿B-{next(_seq)}")
     r_stale = client.put(f"/api/scenarios/{sid}/draft",
-                         json={**p3, "lock_version": lock})
+                         json={**p3, "lock_version": lock, "revision_no": rev_no})
     assert r_stale.status_code == 409
     # 发布同样有乐观锁：旧 lock 失败
     r_pub_stale = client.post(f"/api/scenarios/{sid}/publish",
-                              json={"lock_version": lock})
+                              json={"lock_version": lock, "revision_no": rev_no})
     assert r_pub_stale.status_code == 409
     # 最新 lock 发布成功
     latest = [r for r in client.get(f"/api/scenarios/{sid}/revisions").json()
               if r["status"] == "draft"][0]
     assert client.post(f"/api/scenarios/{sid}/publish",
-                       json={"lock_version": latest["lock_version"]}).status_code == 200
+                       json={"lock_version": latest["lock_version"],
+                             "revision_no": latest["revision_no"]}).status_code == 200
 
 
 def test_idempotent_publish_and_create(client):
     sid = test_create_custom_scenario_and_persist(client)
     p = base_payload(name=f"幂等草稿-{next(_seq)}")
-    draft = client.put(f"/api/scenarios/{sid}/draft", json=p).json()
+    draft = client.put(f"/api/scenarios/{sid}/draft", json={**p, "source_revision_no": 1}).json()
     key = f"idem-pub-{sid}-{next(_seq)}"
-    body = {"lock_version": draft["lock_version"]}
+    body = {"lock_version": draft["lock_version"], "revision_no": draft["revision_no"]}
     r1 = client.post(f"/api/scenarios/{sid}/publish", json=body,
                      headers={"Idempotency-Key": key})
     r2 = client.post(f"/api/scenarios/{sid}/publish", json=body,
@@ -353,15 +356,18 @@ def test_idempotent_publish_and_create(client):
     # 草稿保存幂等：发布后再开新草稿，同键重复提交返回同一修订
     name_a = f"幂等草稿A-{next(_seq)}"
     p2 = base_payload(name=name_a)
-    # 第一次（无键）建立草稿
-    pre = client.put(f"/api/scenarios/{sid}/draft", json=p2)
+    # 第一次（无键）基于当前发布版建立线性草稿
+    pre = client.put(f"/api/scenarios/{sid}/draft",
+                     json={**p2, "source_revision_no": r1.json()["revision_no"] if "r1" in dir() else 2})
     assert pre.status_code == 200
     k1 = f"idem-draft-{sid}-{pre.json()['revision_id']}"
     a = client.put(f"/api/scenarios/{sid}/draft",
-                   json={**p2, "lock_version": pre.json()["lock_version"]},
+                   json={**p2, "lock_version": pre.json()["lock_version"],
+                         "revision_no": pre.json()["revision_no"]},
                    headers={"Idempotency-Key": k1})
     b = client.put(f"/api/scenarios/{sid}/draft",
-                   json={**p2, "lock_version": pre.json()["lock_version"]},
+                   json={**p2, "lock_version": pre.json()["lock_version"],
+                         "revision_no": pre.json()["revision_no"]},
                    headers={"Idempotency-Key": k1})
     assert a.status_code == b.status_code == 200
     assert a.json()["revision_id"] == b.json()["revision_id"]
@@ -369,7 +375,8 @@ def test_idempotent_publish_and_create(client):
     # 同键不同内容 → 409
     other = base_payload(name=f"幂等冲突-{next(_seq)}", denom_floor=0.1)
     r_diff = client.put(f"/api/scenarios/{sid}/draft",
-                        json={**other, "lock_version": 1},
+                        json={**other, "lock_version": 1,
+                              "revision_no": pre.json()["revision_no"]},
                         headers={"Idempotency-Key": k1})
     assert r_diff.status_code == 409
     client.delete(f"/api/scenarios/{sid}/draft")
@@ -379,7 +386,7 @@ def test_revision_timeline_diff_and_published_immutability(client):
     sid = test_create_custom_scenario_and_persist(client)
     # 新建草稿修改 KH 下限
     p = base_payload(name=f"差异摘要-{next(_seq)}", kh_min=0.90)
-    client.put(f"/api/scenarios/{sid}/draft", json=p)
+    client.put(f"/api/scenarios/{sid}/draft", json={**p, "source_revision_no": 1})
     tl = client.get(f"/api/scenarios/{sid}/revisions").json()
     assert {r["revision_no"] for r in tl} == {1, 2}
     draft_dto = next(r for r in tl if r["status"] == "draft")
@@ -394,7 +401,7 @@ def test_rollback_published_as_new_draft(client):
     sid = test_create_custom_scenario_and_persist(client)
     # r2: KH 下限改为 0.90 并发布
     p = base_payload(name=f"回滚研究-{next(_seq)}", kh_min=0.90)
-    d = client.put(f"/api/scenarios/{sid}/draft", json=p).json()
+    d = client.put(f"/api/scenarios/{sid}/draft", json={**p, "source_revision_no": 1}).json()
     client.post(f"/api/scenarios/{sid}/publish", json={"lock_version": d["lock_version"]})
     # 求解 r2（可行）产生历史
     assert client.post(f"/api/scenarios/{sid}/solve").json()["status"] == "feasible"
@@ -437,10 +444,11 @@ def test_draft_publish_and_delete_custom(client):
     sid = test_create_custom_scenario_and_persist(client)
     p = base_payload(name=f"草稿改45-{next(_seq)}")
     p["materials"][0]["min_pct"] = 45.0
-    d = client.put(f"/api/scenarios/{sid}/draft", json=p)
+    d = client.put(f"/api/scenarios/{sid}/draft", json={**p, "source_revision_no": 1})
     assert d.status_code == 200
     lock = d.json()["lock_version"]
-    pub = client.post(f"/api/scenarios/{sid}/publish", json={"lock_version": lock})
+    pub = client.post(f"/api/scenarios/{sid}/publish",
+                      json={"lock_version": lock, "revision_no": d.json()["revision_no"]})
     assert pub.status_code == 200
     assert pub.json()["revision_no"] == 2
     # 发布后场景快照更新且可求解
@@ -454,7 +462,8 @@ def test_draft_publish_and_delete_custom(client):
     db = SessionLocal()
     try:
         good = client.put(f"/api/scenarios/{sid}/draft",
-                          json=base_payload(name=f"发布失败验证-{next(_seq)}", cl_max=0.01))
+                          json={**base_payload(name=f"发布失败验证-{next(_seq)}", cl_max=0.01),
+                                "source_revision_no": 2})
         rev_id = good.json()["revision_id"]
         # 人为钉入一个引用失效成本的草稿（模拟发布前引用被删/失效）
         import json as _json
@@ -467,11 +476,12 @@ def test_draft_publish_and_delete_custom(client):
     finally:
         db.close()
     rbad = client.post(f"/api/scenarios/{sid}/publish",
-                       json={"lock_version": bd_lock})
+                       json={"lock_version": bd_lock, "revision_no": good.json()["revision_no"]})
     assert rbad.status_code == 422
     tl = client.get(f"/api/scenarios/{sid}/revisions").json()
     bd2 = next(x for x in tl if x["revision_id"] == rev_id)
     assert bd2["status"] == "draft"  # 没有变成半发布
+    # 同一非法草稿用过期 lock 发布 → 409（乐观锁）
     # 当前发布版仍是 r2，求解正常
     assert client.post(f"/api/scenarios/{sid}/solve").json()["status"] == "feasible"
     # 放弃草稿
