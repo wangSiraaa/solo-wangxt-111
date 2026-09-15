@@ -93,20 +93,23 @@ class Scenario(Base):
     __tablename__ = "scenario"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(128))
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     description: Mapped[str] = mapped_column(Text, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     # True=内置 S1-S4（虚构演示边界），不可修改/删除；False=研发自建场景
     built_in: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 当前发布修订（草稿不参与求解）；内置场景固定指向 rev1
+    published_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scenario_revision.id", use_alter=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    # 率值目标区间（虚构工艺边界，仅用于离线研究）
-    kh_min: Mapped[float] = mapped_column(Float)
-    kh_max: Mapped[float] = mapped_column(Float)
-    sm_min: Mapped[float] = mapped_column(Float)
-    sm_max: Mapped[float] = mapped_column(Float)
-    im_min: Mapped[float] = mapped_column(Float)
-    im_max: Mapped[float] = mapped_column(Float)
+    # 率值目标区间（由已发布修订同步；创建中的瞬时窗口允许为空）
+    kh_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kh_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sm_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sm_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    im_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    im_max: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # 有害组分上限（干基生料百分数）；碱当量按 Na2O + 0.658*K2O
     mgo_max: Mapped[float] = mapped_column(Float, default=5.0)
@@ -125,6 +128,47 @@ class Scenario(Base):
     items: Mapped[list["ScenarioMaterial"]] = relationship(
         back_populates="scenario", cascade="all, delete-orphan"
     )
+    revisions: Mapped[list["ScenarioRevision"]] = relationship(
+        foreign_keys="ScenarioRevision.scenario_id", back_populates="scenario")
+
+
+class ScenarioRevision(Base):
+    """场景修订版：草稿—发布冻结的不可变快照。
+
+    - 同一自定义场景最多一个 draft；只有 published 修订可求解。
+    - payload_json 钉住每个原料的 assay_id/cost_id，切换生效化验不影响旧修订。
+    - lock_version 为乐观并发版本；发布与草稿保存都必须携带期望值。
+    """
+    __tablename__ = "scenario_revision"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scenario_id: Mapped[int] = mapped_column(ForeignKey("scenario.id"))
+    revision_no: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft / published
+    payload_json: Mapped[str] = mapped_column(Text)
+    lock_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_from_revision_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_by: Mapped[str] = mapped_column(String(64), default="研发")
+
+    scenario: Mapped[Scenario] = relationship(
+        foreign_keys=[scenario_id], back_populates="revisions")
+    __table_args__ = (UniqueConstraint("scenario_id", "revision_no", name="uq_revision_no"),)
+
+
+class RevisionRequest(Base):
+    """幂等请求日志：同一 Idempotency-Key 重复提交返回同一修订结果。"""
+    __tablename__ = "revision_request"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    scope: Mapped[str] = mapped_column(String(32))       # create / save_draft / publish
+    revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    status_code: Mapped[int] = mapped_column(Integer)
+    response_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class ScenarioMaterial(Base):
@@ -149,6 +193,10 @@ class Solution(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     scenario_id: Mapped[int] = mapped_column(ForeignKey("scenario.id"))
+    # 绑定求解时使用的已发布修订版；旧解永不随后续编辑/发布改变
+    scenario_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scenario_revision.id"), nullable=True)
+    revision_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
     profile: Mapped[str] = mapped_column(String(32), default="base")  # base / rain
     mode: Mapped[str] = mapped_column(String(32))     # min_cost / target_center / max_cheap
     status: Mapped[str] = mapped_column(String(32))   # feasible / infeasible / failed

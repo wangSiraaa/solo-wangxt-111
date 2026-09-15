@@ -1,9 +1,19 @@
 <div class="modal-backdrop" (click)="cancel()">
   <div class="modal" (click)="$event.stopPropagation()">
-    <h2 style="margin-top:0">{{ editing ? '编辑自定义场景' : '＋ 新建自定义场景' }}</h2>
+    <h2 style="margin-top:0">{{ title }}</h2>
     <p class="muted" style="margin-top:-6px">
-      全部边界为研发自建的<b>虚构工艺研究条件</b>，不构成生产指令。提交时服务端再次校验，非法不落库。
+      全部边界为研发自建的<b>虚构工艺研究条件</b>，不构成生产指令。
+      已发布修订冻结不可改写；修改将产生递增修订版。提交时服务端再次校验，非法不落库。
     </p>
+    @if (conflictError) {
+      <div class="error-box"><b>并发/版本冲突：</b>{{ conflictError }}</div>
+    }
+    @if (savedDraft) {
+      <div class="warn-box">
+        草稿 r{{ savedDraft.revision_no }} 已保存（lock v{{ savedDraft.lock_version }}）；
+        发布后成为可求解版本。发布前可继续修改并再次保存。
+      </div>
+    }
 
     <div class="form-grid">
       <label class="span2">场景名称（必填，唯一）
@@ -155,9 +165,18 @@
     }
 
     <div class="btn-row">
-      <button class="primary" [disabled]="saving" (click)="save()">
-        {{ saving ? '保存中…' : (editing ? '保存修改' : '保存场景') }}
-      </button>
+      @if (mode === 'create') {
+        <button class="primary" [disabled]="saving" (click)="save()">
+          {{ saving ? '创建并发布中…' : '创建场景并发布 rev1' }}
+        </button>
+      } @else {
+        <button [disabled]="saving" (click)="save(false)">
+          {{ saving ? '保存中…' : '保存草稿' }}
+        </button>
+        <button class="primary" [disabled]="publishing || saving" (click)="publish()">
+          {{ publishing ? '发布中…' : '保存并发布' }}
+        </button>
+      }
       <button (click)="cancel()">取消</button>
     </div>
   </div>

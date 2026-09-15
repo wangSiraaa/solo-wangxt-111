@@ -37,7 +37,7 @@ const { chromium } = require('playwright');
   const pickRow = (code) => page.locator('.mat-pick tbody tr').filter({ hasText: code });
   await pickRow('LS_H').locator('input[type="checkbox"]').first().check();
   await pickRow('LS_L').locator('input[type="checkbox"]').first().check();
-  await page.getByRole('button', { name: '保存场景' }).click();
+  await page.getByRole('button', { name: '创建场景并发布 rev1' }).click();
   await page.waitForTimeout(600);
   const body = await page.textContent('body');
   ok('未知雨季含水率编码字段错误展示', body.includes('GHOST_R2') && body.includes('不在本次参与原料列表中'));
@@ -49,29 +49,30 @@ const { chromium } = require('playwright');
 
   // ---- 用例 2：真实 API — 同一原料双缺（化验 + 成本），两类原因分列 ----
   // 通过代理在后端真实创建一个无化验无成本的原料
-  const created = await page.evaluate(async () => {
+  const bothCode = 'BOTH_MISS_' + Date.now();
+  const created = await page.evaluate(async (code) => {
     const r = await fetch('/api/materials', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: 'BOTH_MISS', name: '双缺料', category: '测试' }),
+      body: JSON.stringify({ code, name: '双缺料', category: '测试' }),
     });
     return r.status === 200;
-  });
+  }, bothCode);
   ok('双缺测试原料已创建', created);
 
   await page.getByRole('button', { name: '＋ 新建自定义场景' }).click();
   await page.waitForTimeout(700);
   await page.locator('.modal input').first().fill('双缺字段测试');
-  await pickRow('BOTH_MISS').locator('input[type="checkbox"]').first().check();
+  await pickRow(bothCode).locator('input[type="checkbox"]').first().check();
   await pickRow('LS_H').locator('input[type="checkbox"]').first().check();
-  await page.getByRole('button', { name: '保存场景' }).click();
+  await page.getByRole('button', { name: '创建场景并发布 rev1' }).click();
   await page.waitForTimeout(800);
   const body2 = await page.textContent('body');
-  ok('双缺：化验缺失原因', /BOTH_MISS[\s\S]{0,80}没有生效化验/.test(body2));
-  ok('双缺：成本缺失原因', /BOTH_MISS[\s\S]{0,160}没有生效成本/.test(body2));
+  ok('双缺：化验缺失原因', new RegExp(bothCode+'[\\s\\S]{0,80}没有有效的生效化验').test(body2));
+  ok('双缺：成本缺失原因', new RegExp(bothCode+'[\\s\\S]{0,160}没有有效的生效成本').test(body2));
   // 错误落在该原料所在行
-  const badRow = page.locator('.mat-pick tbody tr').filter({ hasText: 'BOTH_MISS' });
+  const badRow = page.locator('.mat-pick tbody tr').filter({ hasText: bothCode });
   const rowText = await badRow.textContent();
-  ok('双缺原因定位在同一原料行', rowText.includes('没有生效化验') && rowText.includes('没有生效成本'));
+  ok('双缺原因定位在同一原料行', rowText.includes('没有有效的生效化验') && rowText.includes('没有有效的生效成本'));
   ok('双缺提交后弹窗仍在（不落半成品）', (await page.locator('.modal').count()) === 1);
 
   let fail = 0;

@@ -3,6 +3,7 @@
 注意：所有成分与价格均为虚构，仅用于离线工艺研究，不对应任何真实矿山/工厂。
 """
 import json
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -70,6 +71,8 @@ def seed(db: Session) -> None:
         created[code] = m
     db.flush()
 
+    from .revision_service import payload_from_scenario
+
     def add_scenario(name, desc, target, items, rain=None, extra=None, hazards=None):
         hazards = hazards or {}
         sc = models.Scenario(
@@ -89,6 +92,15 @@ def seed(db: Session) -> None:
             db.add(models.ScenarioMaterial(
                 scenario_id=sc.id, material_id=created[code].id,
                 min_pct=mn, max_pct=mx, preferred_cheap=cheap))
+        db.flush()
+        # 内置场景同样冻结 rev1（不可进入后续修订流程）
+        payload = payload_from_scenario(db, sc)
+        rev = models.ScenarioRevision(
+            scenario_id=sc.id, revision_no=1, status="published",
+            payload_json=json.dumps(payload, ensure_ascii=False), lock_version=1,
+            published_at=datetime.utcnow())
+        db.add(rev); db.flush()
+        sc.published_revision_id = rev.id
         return sc
 
     base_target = dict(kh=(0.86, 0.96), sm=(2.3, 2.8), im=(1.2, 1.8))

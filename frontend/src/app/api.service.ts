@@ -24,6 +24,10 @@ export interface ScenarioMaterial {
 export interface Scenario {
   id: number; name: string; description: string;
   built_in?: boolean; created_at?: string;
+  published_revision_no?: number | null;
+  draft_revision_no?: number | null;
+  draft_revision_id?: number | null;
+  draft_lock_version?: number | null;
   targets: { kh: [number, number]; sm: [number, number]; im: [number, number] };
   hazards: { mgo_max: number; so3_max: number; alkali_eq_max: number; cl_max: number };
   denom_floor: number;
@@ -34,6 +38,26 @@ export interface Scenario {
 
 export interface ScenarioMaterialInput {
   material_code: string; min_pct: number; max_pct: number | null; preferred_cheap: boolean;
+  assay_id?: number | null;
+  cost_id?: number | null;
+}
+
+export interface RevisionDto {
+  revision_id: number;
+  scenario_id: number;
+  revision_no: number;
+  status: 'draft' | 'published';
+  lock_version: number;
+  created_from_revision_no: number | null;
+  created_at: string | null;
+  published_at: string | null;
+  solutions: number;
+  payload: ScenarioInput & { materials: Array<ScenarioMaterialInput> };
+  diff_from_published?: { changes: RevisionChange[]; change_count: number } | null;
+}
+
+export interface RevisionChange {
+  field: string; label: string; old: unknown; new: unknown;
 }
 
 export interface ScenarioInput {
@@ -87,6 +111,7 @@ export interface TraceBody {
 
 export interface SolutionDto {
   solution_id: number; scenario_id?: number; profile?: string;
+  scenario_revision_id?: number | null; revision_no?: number | null;
   mode: string; status: string;
   cost_dry_t: number | null; cost_wet_t: number | null;
   kh: number | null; sm: number | null; im: number | null;
@@ -161,12 +186,47 @@ export class ApiService {
     return this.http.delete(`/api/scenarios/${id}`);
   }
 
+  revisions(id: number): Observable<RevisionDto[]> {
+    return this.http.get<RevisionDto[]>(`/api/scenarios/${id}/revisions`);
+  }
+
+  saveDraft(id: number, body: ScenarioInput & { lock_version?: number | null;
+                                              source_revision_no?: number | null },
+            idemKey?: string): Observable<RevisionDto> {
+    return this.http.put<RevisionDto>(`/api/scenarios/${id}/draft`, body,
+      { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
+  }
+
+  publishDraft(id: number, lockVersion: number,
+               idemKey?: string): Observable<RevisionDto> {
+    return this.http.post<RevisionDto>(`/api/scenarios/${id}/publish`,
+      { lock_version: lockVersion },
+      { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
+  }
+
+  rollbackDraft(id: number, sourceRevisionNo?: number,
+                idemKey?: string): Observable<RevisionDto> {
+    return this.http.post<RevisionDto>(`/api/scenarios/${id}/rollback-draft`,
+      { source_revision_no: sourceRevisionNo ?? null },
+      { headers: idemKey ? { 'Idempotency-Key': idemKey } : {} });
+  }
+
+  discardDraft(id: number): Observable<unknown> {
+    return this.http.delete(`/api/scenarios/${id}/draft`);
+  }
+
+  static idemKey(): string {
+    return 'web-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
   availability(code: string): Observable<AvailabilityInfo | null> {
     return this.http.get<AvailabilityInfo | null>(`/api/materials/${code}/availability`);
   }
 
-  solve(id: number, profile: 'base' | 'rain'): Observable<SolveResponse> {
-    return this.http.post<SolveResponse>(`/api/scenarios/${id}/solve?profile=${profile}`, {});
+  solve(id: number, profile: 'base' | 'rain', revisionNo?: number): Observable<SolveResponse> {
+    const rev = revisionNo !== undefined ? `&revision_no=${revisionNo}` : '';
+    return this.http.post<SolveResponse>(
+      `/api/scenarios/${id}/solve?profile=${profile}${rev}`, {});
   }
 
   solutions(id: number): Observable<SolutionDto[]> {

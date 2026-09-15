@@ -176,14 +176,14 @@ def test_unknown_rain_extra_cost_code_rejected_and_not_persisted(client):
     assert len(client.get("/api/scenarios").json()) == before
 
 
-def test_unknown_rain_code_rejected_on_update(client):
+def test_unknown_rain_code_rejected_on_draft(client):
     sid = test_create_custom_scenario_and_persist(client)
-    p = base_payload(name=f"更新带未知雨季码-{next(_seq)}")
+    p = base_payload(name=f"草稿未知雨季码-{next(_seq)}")
     p["rain_overrides"] = {"GHOST_R2": 9.0}
-    r = client.put(f"/api/scenarios/{sid}", json=p)
+    r = client.put(f"/api/scenarios/{sid}/draft", json=p)
     assert r.status_code == 422
     assert "rain_overrides.GHOST_R2" in r.json()["detail"]["fields"]
-    # 原场景未被破坏，仍可求解
+    # 当前发布版未被破坏，仍可求解
     assert client.post(f"/api/scenarios/{sid}/solve").json()["status"] == "feasible"
 
 
@@ -201,8 +201,14 @@ def test_unknown_code_and_duplicate_material(client):
 
 
 def test_builtin_cannot_modify_or_delete(client):
-    assert client.put("/api/scenarios/1", json=base_payload(name="尝试改内置")).status_code == 403
+    # 直接改写已发布场景：405（已发布修订不可改写，必须走草稿—发布）
+    assert client.put("/api/scenarios/1", json=base_payload(name="尝试改内置")).status_code == 405
     assert client.delete("/api/scenarios/1").status_code == 403
+    # 内置场景不可进入任何修订流程
+    p = base_payload(name="内置草稿尝试")
+    assert client.put("/api/scenarios/1/draft", json=p).status_code == 403
+    assert client.post("/api/scenarios/1/publish", json={"lock_version": 1}).status_code == 403
+    assert client.post("/api/scenarios/1/rollback-draft", json={}).status_code == 403
 
 
 def test_custom_scenario_solve_base_and_rain_with_history(client):
@@ -270,28 +276,208 @@ def test_assay_version_snapshot_old_vs_new(client):
     assert r.status_code == 200
     new_assay_id = r.json()["id"]
 
+    # 新修订草稿钉住新化验版本；旧发布修订不被改变
+    p = base_payload(name=f"换化验后的修订-{next(_seq)}")
+    draft = client.put(f"/api/scenarios/{sid}/draft", json=p)
+    assert draft.status_code == 200, draft.text
+    lock = draft.json()["lock_version"]
+    rev2_no = draft.json()["revision_no"]
+    pub = client.post(f"/api/scenarios/{sid}/publish", json={"lock_version": lock})
+    assert pub.status_code == 200, pub.text
+
+    # 新发布修订求解：引用新化验
     client.post(f"/api/scenarios/{sid}/solve?profile=base")
     hist = client.get(f"/api/scenarios/{sid}/solutions").json()
-    new_assay_seen = hist[0]["trace"]["provenance"]["assay_versions"]["LS_H"]["assay_id"]
-    assert new_assay_seen == new_assay_id
-    # 旧解（在历史靠后位置）仍保留旧版本引用
-    older = [h for h in hist
-             if h["trace"].get("provenance", {}).get("assay_versions", {})
-                .get("LS_H", {}).get("assay_id") == old_assay_id]
-    assert older
+    new_sols = [h for h in hist if h["revision_no"] == rev2_no]
+    old_sols = [h for h in hist if h["revision_no"] == 1]
+    assert new_sols and old_sols
+    assert new_sols[0]["trace"]["provenance"]["assay_versions"]["LS_H"]["assay_id"] == new_assay_id
+    # 旧修订的历史解仍引用旧化验版本
+    assert old_sols[0]["trace"]["provenance"]["assay_versions"]["LS_H"]["assay_id"] == old_assay_id
+    # 旧修订重放求解仍引用旧化验（旧版本永久可读、可重放）
+    replay = client.post(f"/api/scenarios/{sid}/solve?revision_no=1")
+    assert replay.status_code == 200
+    feas = [s for s in replay.json()["solutions"] if s["status"] == "feasible"][0]
+    assert feas["trace"]["provenance"]["assay_versions"]["LS_H"]["assay_id"] == old_assay_id
+    # 草稿不可求解
+    client.put(f"/api/scenarios/{sid}/draft",
+               json=base_payload(name=f"临时草稿-{next(_seq)}"))
+    draft_rev = client.get(f"/api/scenarios/{sid}/revisions").json()[0]
+    assert draft_rev["status"] == "draft"
+    assert client.post(f"/api/scenarios/{sid}/solve?revision_no={draft_rev['revision_no']}").status_code == 409
     assert old_assay_id != new_assay_id
 
 
-def test_update_and_delete_custom(client):
+def test_optimistic_concurrency_two_editors(client):
+    """两个浏览器基于同一草稿保存：只有一个成功（409 给后者）。"""
     sid = test_create_custom_scenario_and_persist(client)
-    p = base_payload(name=f"自定义研究场景改-{next(_seq)}")
-    # 更新：改名称并把 LS_H 最低掺量从 55% 降到 45%（保持可行体系）
-    p["materials"][0]["min_pct"] = 45.0
-    r = client.put(f"/api/scenarios/{sid}", json=p)
-    assert r.status_code == 200 and len(r.json()["materials"]) == 6
-    assert r.json()["materials"][0]["min_pct"] == 45.0
-    # 更新后仍可求解
+    p = base_payload(name=f"并发草稿-{next(_seq)}")
+    d1 = client.put(f"/api/scenarios/{sid}/draft", json=p).json()
+    lock = d1["lock_version"]
+    # 浏览器 A 先保存成功
+    p2 = base_payload(name=f"并发草稿A-{next(_seq)}")
+    r_ok = client.put(f"/api/scenarios/{sid}/draft",
+                      json={**p2, "lock_version": lock})
+    assert r_ok.status_code == 200
+    assert r_ok.json()["lock_version"] == lock + 1
+    # 浏览器 B 用过期 lock 保存
+    p3 = base_payload(name=f"并发草稿B-{next(_seq)}")
+    r_stale = client.put(f"/api/scenarios/{sid}/draft",
+                         json={**p3, "lock_version": lock})
+    assert r_stale.status_code == 409
+    # 发布同样有乐观锁：旧 lock 失败
+    r_pub_stale = client.post(f"/api/scenarios/{sid}/publish",
+                              json={"lock_version": lock})
+    assert r_pub_stale.status_code == 409
+    # 最新 lock 发布成功
+    latest = [r for r in client.get(f"/api/scenarios/{sid}/revisions").json()
+              if r["status"] == "draft"][0]
+    assert client.post(f"/api/scenarios/{sid}/publish",
+                       json={"lock_version": latest["lock_version"]}).status_code == 200
+
+
+def test_idempotent_publish_and_create(client):
+    sid = test_create_custom_scenario_and_persist(client)
+    p = base_payload(name=f"幂等草稿-{next(_seq)}")
+    draft = client.put(f"/api/scenarios/{sid}/draft", json=p).json()
+    key = f"idem-pub-{sid}-{next(_seq)}"
+    body = {"lock_version": draft["lock_version"]}
+    r1 = client.post(f"/api/scenarios/{sid}/publish", json=body,
+                     headers={"Idempotency-Key": key})
+    r2 = client.post(f"/api/scenarios/{sid}/publish", json=body,
+                     headers={"Idempotency-Key": key})
+    assert r1.status_code == 200 and r2.status_code == 200
+    # 重复提交返回同一修订结果（revision_no / revision_id 相同）
+    assert r1.json()["revision_id"] == r2.json()["revision_id"]
+    assert r2.json().get("replay") is True
+    # 草稿保存幂等：发布后再开新草稿，同键重复提交返回同一修订
+    name_a = f"幂等草稿A-{next(_seq)}"
+    p2 = base_payload(name=name_a)
+    # 第一次（无键）建立草稿
+    pre = client.put(f"/api/scenarios/{sid}/draft", json=p2)
+    assert pre.status_code == 200
+    k1 = f"idem-draft-{sid}-{pre.json()['revision_id']}"
+    a = client.put(f"/api/scenarios/{sid}/draft",
+                   json={**p2, "lock_version": pre.json()["lock_version"]},
+                   headers={"Idempotency-Key": k1})
+    b = client.put(f"/api/scenarios/{sid}/draft",
+                   json={**p2, "lock_version": pre.json()["lock_version"]},
+                   headers={"Idempotency-Key": k1})
+    assert a.status_code == b.status_code == 200
+    assert a.json()["revision_id"] == b.json()["revision_id"]
+    assert b.json().get("replay") is True
+    # 同键不同内容 → 409
+    other = base_payload(name=f"幂等冲突-{next(_seq)}", denom_floor=0.1)
+    r_diff = client.put(f"/api/scenarios/{sid}/draft",
+                        json={**other, "lock_version": 1},
+                        headers={"Idempotency-Key": k1})
+    assert r_diff.status_code == 409
+    client.delete(f"/api/scenarios/{sid}/draft")
+
+
+def test_revision_timeline_diff_and_published_immutability(client):
+    sid = test_create_custom_scenario_and_persist(client)
+    # 新建草稿修改 KH 下限
+    p = base_payload(name=f"差异摘要-{next(_seq)}", kh_min=0.90)
+    client.put(f"/api/scenarios/{sid}/draft", json=p)
+    tl = client.get(f"/api/scenarios/{sid}/revisions").json()
+    assert {r["revision_no"] for r in tl} == {1, 2}
+    draft_dto = next(r for r in tl if r["status"] == "draft")
+    fields = {c["field"] for c in draft_dto["diff_from_published"]["changes"]}
+    assert "kh_min" in fields
+    # 发布历史版本 r1 仍可单独读取（永久可读）
+    r1 = client.get(f"/api/scenarios/{sid}/revisions/1").json()
+    assert r1["status"] == "published" and r1["payload"]["kh_min"] == 0.86
+
+
+def test_rollback_published_as_new_draft(client):
+    sid = test_create_custom_scenario_and_persist(client)
+    # r2: KH 下限改为 0.90 并发布
+    p = base_payload(name=f"回滚研究-{next(_seq)}", kh_min=0.90)
+    d = client.put(f"/api/scenarios/{sid}/draft", json=p).json()
+    client.post(f"/api/scenarios/{sid}/publish", json={"lock_version": d["lock_version"]})
+    # 求解 r2（可行）产生历史
     assert client.post(f"/api/scenarios/{sid}/solve").json()["status"] == "feasible"
+    # 从当前发布 r2 回滚为新草稿（内容等同 r2，审计源记为 2）
+    rb = client.post(f"/api/scenarios/{sid}/rollback-draft", json={})
+    assert rb.status_code == 200
+    assert rb.json()["created_from_revision_no"] == 2
+    tl_nos = [r["revision_no"] for r in client.get(f"/api/scenarios/{sid}/revisions").json()]
+    assert 3 in tl_nos
+    # 已有草稿时再回滚被拒绝
+    assert client.post(f"/api/scenarios/{sid}/rollback-draft", json={}).status_code == 409
+
+
+def test_recover_no_half_published_state(client):
+    """模拟半发布指针损坏：启动恢复函数把指针修回最近有效发布版。"""
+    sid = test_create_custom_scenario_and_persist(client)
+    from app.database import SessionLocal
+    from app import models
+    db = SessionLocal()
+    try:
+        # 人为制造孤儿指针
+        db.query(models.Scenario).filter_by(id=sid).update(
+            {models.Scenario.published_revision_id.name: 999999},
+            synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+    from app.revision_service import recover
+    db = SessionLocal()
+    try:
+        notes = recover(db)
+        assert any(f"场景 {sid}" in n for n in notes)
+    finally:
+        db.close()
+    # 恢复后求解正常
+    assert client.post(f"/api/scenarios/{sid}/solve").json()["status"] == "feasible"
+
+
+def test_draft_publish_and_delete_custom(client):
+    sid = test_create_custom_scenario_and_persist(client)
+    p = base_payload(name=f"草稿改45-{next(_seq)}")
+    p["materials"][0]["min_pct"] = 45.0
+    d = client.put(f"/api/scenarios/{sid}/draft", json=p)
+    assert d.status_code == 200
+    lock = d.json()["lock_version"]
+    pub = client.post(f"/api/scenarios/{sid}/publish", json={"lock_version": lock})
+    assert pub.status_code == 200
+    assert pub.json()["revision_no"] == 2
+    # 发布后场景快照更新且可求解
+    r = client.get("/api/scenarios").json()
+    cur = next(s for s in r if s["id"] == sid)
+    assert cur["published_revision_no"] == 2 and cur["draft_revision_no"] is None
+    assert client.post(f"/api/scenarios/{sid}/solve").json()["status"] == "feasible"
+    # 发布失败不留半发布：构造内容非法的草稿（绕过保存校验）后发布必须 422
+    from app.database import SessionLocal
+    from app import models
+    db = SessionLocal()
+    try:
+        good = client.put(f"/api/scenarios/{sid}/draft",
+                          json=base_payload(name=f"发布失败验证-{next(_seq)}", cl_max=0.01))
+        rev_id = good.json()["revision_id"]
+        # 人为钉入一个引用失效成本的草稿（模拟发布前引用被删/失效）
+        import json as _json
+        rev = db.get(models.ScenarioRevision, rev_id)
+        payload = _json.loads(rev.payload_json)
+        payload["materials"][0]["cost_id"] = 999999
+        rev.payload_json = _json.dumps(payload, ensure_ascii=False)
+        db.commit()
+        bd_lock = rev.lock_version
+    finally:
+        db.close()
+    rbad = client.post(f"/api/scenarios/{sid}/publish",
+                       json={"lock_version": bd_lock})
+    assert rbad.status_code == 422
+    tl = client.get(f"/api/scenarios/{sid}/revisions").json()
+    bd2 = next(x for x in tl if x["revision_id"] == rev_id)
+    assert bd2["status"] == "draft"  # 没有变成半发布
+    # 当前发布版仍是 r2，求解正常
+    assert client.post(f"/api/scenarios/{sid}/solve").json()["status"] == "feasible"
+    # 放弃草稿
+    assert client.delete(f"/api/scenarios/{sid}/draft").status_code == 200
+    # 删除场景（连同全部修订与解）
     assert client.delete(f"/api/scenarios/{sid}").status_code == 200
     assert client.get(f"/api/scenarios/{sid}/solutions").status_code == 404
     assert client.delete(f"/api/scenarios/{sid}").status_code == 404
+

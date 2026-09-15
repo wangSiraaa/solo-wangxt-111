@@ -73,6 +73,9 @@ class ScenarioMaterialIn(BaseModel):
     min_pct: float = 0.0
     max_pct: Optional[float] = None
     preferred_cheap: bool = False
+    # 修订草稿可显式钉住引用；建单时留空由后端填当前生效版本
+    assay_id: Optional[int] = None
+    cost_id: Optional[int] = None
 
 
 class ScenarioIn(BaseModel):

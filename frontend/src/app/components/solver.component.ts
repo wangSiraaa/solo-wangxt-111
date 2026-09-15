@@ -1,7 +1,7 @@
 import { Component, OnInit } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
 import {
-  ApiService, Scenario, SolutionDto, SolveResponse,
+  ApiService, Scenario, SolutionDto, SolveResponse, RevisionDto,
 } from '../api.service';
 import { MixResultComponent } from './mix-result.component';
 import { ConflictsComponent } from './conflicts.component';
@@ -23,15 +23,17 @@ export class SolverComponent implements OnInit {
   rain: SolveResponse | null = null;
   activeProfile: 'base' | 'rain' = 'base';
   editorOpen = false;
-  editorTarget: Scenario | null = null;
+  editorMode: 'create' | 'draft' = 'create';
+  editorScenario: Scenario | null = null;
+  editorSource: RevisionDto | null = null;
   history: SolutionDto[] = [];
   historyOpen = false;
+  timeline: RevisionDto[] = [];
+  timelineOpen = false;
 
   constructor(private api: ApiService) {}
 
-  ngOnInit() {
-    this.loadScenarios(true);
-  }
+  ngOnInit() { this.loadScenarios(true); }
 
   loadScenarios(autoselectFirst = false, preferredId?: number) {
     this.api.scenarios().subscribe(ss => {
@@ -49,11 +51,9 @@ export class SolverComponent implements OnInit {
   get scenario(): Scenario | undefined {
     return this.scenarios.find(s => s.id === this.selectedId);
   }
-
   get current(): SolveResponse | null {
     return this.activeProfile === 'base' ? this.base : this.rain;
   }
-
   get hasRain(): boolean {
     return Object.keys(this.scenario?.rain_overrides ?? {}).length > 0;
   }
@@ -61,6 +61,7 @@ export class SolverComponent implements OnInit {
   select(id: number) {
     if (id === this.selectedId) return;
     this.selectedId = id;
+    this.timeline = []; this.timelineOpen = false;
     this.reload();
   }
 
@@ -79,31 +80,71 @@ export class SolverComponent implements OnInit {
         if (profile === 'base') this.base = r; else this.rain = r;
         this.loading = false;
       },
-      error: e => {
-        this.error = ApiService.errText(e);
-        this.loading = false;
-      },
+      error: e => { this.error = ApiService.errText(e); this.loading = false; },
     });
   }
 
-  openCreate() { this.editorTarget = null; this.editorOpen = true; }
-  openEdit() { this.editorTarget = this.scenario ?? null; this.editorOpen = true; }
-  closeEditor() { this.editorOpen = false; this.editorTarget = null; }
+  openCreate() {
+    this.editorMode = 'create';
+    this.editorScenario = null;
+    this.editorSource = null;
+    this.editorOpen = true;
+  }
 
-  onSaved(s: Scenario) {
-    this.editorOpen = false; this.editorTarget = null;
-    this.loadScenarios(false, s.id);
-    this.selectedId = s.id;
-    this.reload();
+  continueDraft() {
+    if (!this.scenario?.draft_revision_id) return;
+    this.api.revisions(this.selectedId).subscribe(rs => {
+      const draft = rs.find(r => r.status === 'draft');
+      if (draft) this.openEditDraft(draft);
+    });
+  }
+
+  continueDraftRevision(rev: RevisionDto) {
+    this.openEditDraft(rev);
+  }
+
+  fmtVal(v: unknown): string {
+    if (v === null || v === undefined) return '—';
+    if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(3);
+    if (typeof v === 'boolean') return v ? '是' : '否';
+    return String(v);
+  }
+
+  openEditDraft(source: RevisionDto | null = null) {
+    if (!this.scenario || this.scenario.built_in) return;
+    this.editorMode = 'draft';
+    this.editorScenario = this.scenario;
+    if (source) {
+      this.editorSource = source;
+      this.editorOpen = true;
+      return;
+    }
+    // 从当前发布版复制：拉取发布修订后再打开，保证编辑器初始化时已有源数据
+    this.editorSource = null;
+    this.api.revisions(this.selectedId).subscribe(rs => {
+      const pub = rs.find(r => r.revision_no === this.scenario!.published_revision_no)
+        ?? [...rs].reverse().find(r => r.status === 'published') ?? null;
+      this.editorSource = pub;
+      this.editorOpen = true;
+    });
+  }
+
+  closeEditor() {
+    this.editorOpen = false;
+    this.editorScenario = null;
+    this.editorSource = null;
+  }
+
+  onSaved(e: { scenarioId: number; revision: RevisionDto | null }) {
+    this.editorOpen = false;
+    this.loadScenarios(false, e.scenarioId || this.selectedId);
   }
 
   deleteCurrent() {
     const s = this.scenario;
     if (!s || s.built_in) return;
-    if (!confirm(`确定删除自定义场景「${s.name}」及其全部历史解？此操作不可恢复。`)) return;
-    this.api.deleteScenario(s.id).subscribe(() => {
-      this.loadScenarios(true);
-    });
+    if (!confirm(`确定删除自定义场景「${s.name}」及其全部修订与历史解？此操作不可恢复。`)) return;
+    this.api.deleteScenario(s.id).subscribe(() => this.loadScenarios(true));
   }
 
   loadHistory() {
@@ -111,6 +152,58 @@ export class SolverComponent implements OnInit {
     if (this.historyOpen && !this.history.length) {
       this.api.solutions(this.selectedId).subscribe(rows => this.history = rows);
     }
+  }
+
+  loadTimeline() {
+    this.timelineOpen = !this.timelineOpen;
+    if (this.timelineOpen && !this.timeline.length) {
+      this.api.revisions(this.selectedId).subscribe(rs => this.timeline = rs);
+    }
+  }
+
+  publishRevision(rev: RevisionDto) {
+    this.api.publishDraft(this.selectedId, rev.lock_version, ApiService.idemKey()).subscribe({
+      next: () => {
+        this.timeline = [];
+        this.loadScenarios(false, this.selectedId);
+      },
+      error: e => alert(e.error?.detail?.message ?? '发布失败（可能已被其他会话修改）'),
+    });
+  }
+
+  discardDraft() {
+    if (!confirm('放弃当前草稿？已发布版本与历史解不受影响。')) return;
+    this.api.discardDraft(this.selectedId).subscribe(() => {
+      this.timeline = []; this.loadScenarios(false, this.selectedId);
+    });
+  }
+
+  rollbackTo(revNo: number) {
+    this.api.rollbackDraft(this.selectedId, revNo, ApiService.idemKey()).subscribe({
+      next: d => {
+        this.timeline = [];
+        this.loadScenarios(false, this.selectedId);
+        // 用回滚产生的草稿修订直接打开编辑器（来源标记为被复制的旧发布版）
+        this.editorMode = 'draft';
+        this.editorScenario = this.scenario ?? null;
+        this.editorSource = d;
+        this.editorOpen = true;
+      },
+      error: e => alert(e.error?.detail?.message ?? '回滚草稿失败'),
+    });
+  }
+
+  replayRevision(revNo: number) {
+    // 重放旧发布修订：切换该修订求解（产生绑定 revNo 的新审计解）
+    this.loading = true;
+    this.api.solve(this.selectedId, this.activeProfile, revNo).subscribe({
+      next: r => {
+        this.loading = false;
+        if (this.activeProfile === 'base') this.base = r; else this.rain = r;
+        this.history = [];
+      },
+      error: e => { this.loading = false; alert(ApiService.errText(e)); },
+    });
   }
 
   feasible(resp: SolveResponse | null): SolutionDto[] {
@@ -122,8 +215,7 @@ export class SolverComponent implements OnInit {
     const labels: Record<string, string> = {
       min_cost: '最低成本', target_center: '指标居中', max_cheap: '廉价原料最大化',
     };
-    const modes = ['min_cost', 'target_center', 'max_cheap'];
-    return modes.map(mode => ({
+    return ['min_cost', 'target_center', 'max_cheap'].map(mode => ({
       mode, label: labels[mode],
       base: this.feasible(this.base).find(s => s.mode === mode),
       rain: this.feasible(this.rain).find(s => s.mode === mode),
@@ -133,47 +225,43 @@ export class SolverComponent implements OnInit {
   cheapCodes(): string[] {
     return (this.scenario?.materials ?? []).filter(m => m.preferred_cheap).map(m => m.code);
   }
-
   cheapPct(s: SolutionDto | undefined): number {
     if (!s) return 0;
     return this.cheapCodes().reduce((acc, c) => acc + (s.mix[c] || 0), 0);
   }
-
   rainEntries(): Array<[string, number]> {
     return Object.entries(this.scenario?.rain_overrides ?? {});
   }
-
   modeLabel(mode: string): string {
     return ({ min_cost: '💰 最低成本', target_center: '🎯 指标居中',
               max_cheap: '🏷 廉价最大化', diagnosis: '🚫 冲突诊断' } as Record<string, string>)[mode] ?? mode;
   }
-
   deltaCost(b?: SolutionDto, r?: SolutionDto): number {
     return (r?.cost_dry_t ?? 0) - (b?.cost_dry_t ?? 0);
   }
-
   arrow(a?: number | null, b?: number | null, digits = '1.3-3'): string {
-    const fmt = (v: number) => v.toFixed(digits === '1.2-2' ? 2 : digits === '1.3-3' ? 3 : 3);
+    const fmt = (v: number) => v.toFixed(digits === '1.2-2' ? 2 : 3);
     if (a === undefined || a === null || b === undefined || b === null) return '—';
-    const arrowChar = b > a + 1e-9 ? ' ↑' : b < a - 1e-9 ? ' ↓' : ' →';
-    return `${fmt(a)} → ${fmt(b)}${arrowChar}`;
+    const c = b > a + 1e-9 ? ' ↑' : b < a - 1e-9 ? ' ↓' : ' →';
+    return `${fmt(a)} → ${fmt(b)}${c}`;
   }
-
   pctArrow(a: number, b: number): string {
-    const arrowChar = b > a + 1e-9 ? ' ↑' : b < a - 1e-9 ? ' ↓' : ' →';
-    return `${a.toFixed(2)}% → ${b.toFixed(2)}%${arrowChar}`;
+    const c = b > a + 1e-9 ? ' ↑' : b < a - 1e-9 ? ' ↓' : ' →';
+    return `${a.toFixed(2)}% → ${b.toFixed(2)}%${c}`;
   }
-
   inKh(v?: number | null) { return v != null && v >= this.scenario!.targets.kh[0] && v <= this.scenario!.targets.kh[1]; }
   inSm(v?: number | null) { return v != null && v >= this.scenario!.targets.sm[0] && v <= this.scenario!.targets.sm[1]; }
   inIm(v?: number | null) { return v != null && v >= this.scenario!.targets.im[0] && v <= this.scenario!.targets.im[1]; }
 
-  /** 从历史解 trace 中取快照化验版本（旧解保留旧版本，不会随当前生效版本改变）。 */
   snapshotAssays(h: SolutionDto): string {
     const av = h.trace?.provenance?.assay_versions ?? {};
     const entries = Object.values(av).slice(0, 3)
       .map(v => `${v.material}:${v.assay_version}#${v.assay_id}`);
     const more = Object.keys(av).length > 3 ? ` +${Object.keys(av).length - 3}` : '';
     return entries.join('，') + more;
+  }
+
+  fmtTime(s: string | null | undefined): string {
+    return (s ?? '').replace('T', ' ').slice(0, 19);
   }
 }

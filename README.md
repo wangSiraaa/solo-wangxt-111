@@ -71,7 +71,44 @@
 
 历史结果可通过 `GET /api/scenarios/{id}/solutions` 与 `GET /api/solutions/{id}` 回溯。
 
-## 自定义场景（研发自建虚构边界）
+## 自定义场景与修订版（草稿—发布冻结—可重放审计）
+
+研发对同一新矿点持续调边界时，历史解**绝不被后续修改覆盖**：
+
+- **建单即发布 rev1**：`POST /api/scenarios` 单事务创建场景 + 已发布修订；
+- **修订链**：`PUT /scenarios/{id}/draft`（每场景至多一个草稿，递增 revision_no、lock_version）→
+  `POST /scenarios/{id}/publish`（原子冻结并同步当前求解快照）；
+  旧发布修订与旧解永久可读，**已发布数据不可直接改写**（`PUT /scenarios/{id}` 返回 405）；
+- **只有已发布修订可求解**（草稿返回 409）；求解可带 `?revision_no=N` **重放任意旧发布修订**，
+  每个 Solution 绑定 `scenario_revision_id/revision_no`，历史列表按修订关联；
+- **化验版本钉住**：修订 payload 记录每个原料当时的 `assay_id/cost_id`，
+  切换生效化验后旧修订、旧解仍引用旧版本，新修订、新解才使用新版本；
+- **乐观并发**：草稿保存/发布必须携带 `lock_version`，服务端用带版本条件的 UPDATE 保证
+  两个浏览器并发提交只有一个成功，另一个收到 409；
+- **幂等请求键**：`Idempotency-Key` 头——重复提交返回同一修订结果（`replay:true`），
+  同键不同内容返回 409；
+- **无半成品**：发布是单事务（状态翻转 + 场景快照 + 幂等日志），失败/重启整体回滚；
+  启动 `recover()` 修复孤儿发布指针、并为升级前旧场景回填 rev1；
+- **回滚**：`POST /scenarios/{id}/rollback-draft` 把任意旧发布版复制为新草稿
+  （记录 `created_from_revision_no`，审计链完整，历史冲突诊断不受影响）；
+- **内置保护**：S1–S4 有冻结 rev1，草稿/发布/回滚接口一律 403。
+
+Angular 场景栏显示当前发布版、草稿状态与 lock；「版本时间线」面板列出每个修订的状态、来源、
+时间、关联解数、与发布版的**差异摘要**（边界/雨季/原料增删与掺量、化验版本变化），
+并提供「重放求解 / 复制为新草稿 / 继续编辑 / 发布 / 放弃」；历史解表新增修订列。
+
+### 修订相关接口
+
+| 方法/路径 | 说明 |
+|---|---|
+| `GET /api/scenarios/{id}/revisions[/{no}]` | 版本时间线（草稿含差异摘要）/ 单修订 |
+| `PUT /api/scenarios/{id}/draft` | 保存草稿（body 带 `lock_version`/`source_revision_no`，头带 `Idempotency-Key`） |
+| `POST /api/scenarios/{id}/publish` | 发布草稿（乐观锁 + 幂等键；发布前重跑全量校验） |
+| `POST /api/scenarios/{id}/rollback-draft` | 旧发布版复制为新草稿 |
+| `DELETE /api/scenarios/{id}/draft` | 放弃草稿（不影响已发布版与历史解） |
+| `POST /api/scenarios/{id}/solve?revision_no=N` | 重放指定已发布修订 |
+
+## 自定义场景校验
 
 「＋ 新建自定义场景」支持：选择参与原料、名称与说明、KH/SM/IM 目标区间、有害组分上限、
 分母地板、每原料最低掺量/场景上限/廉价标记，以及可选的雨季含水率覆盖与雨季附加成本。

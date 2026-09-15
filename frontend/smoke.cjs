@@ -65,7 +65,7 @@ const { chromium } = require('playwright');
   await page.getByRole('button', { name: /S1/ }).click();
   await page.waitForTimeout(1000);
   checks.push(['内置场景无编辑/删除按钮',
-    (await page.getByRole('button', { name: '编辑此场景' }).count()) === 0 &&
+    (await page.getByRole('button', { name: /从发布版新建修订草稿/ }).count()) === 0 &&
     (await page.getByRole('button', { name: '删除此场景' }).count()) === 0]);
 
   const uname = '浏览器新矿点场景 ' + Date.now();
@@ -73,7 +73,7 @@ const { chromium } = require('playwright');
   // 非法提交：空名称 + 取消（先验证客户端拦截）
   await page.getByRole('button', { name: '＋ 新建自定义场景' }).click();
   await page.waitForTimeout(600);
-  await page.getByRole('button', { name: '保存场景' }).click();
+  await page.getByRole('button', { name: '创建场景并发布 rev1' }).click();
   await page.waitForTimeout(300);
   checks.push(['空名称客户端拦截', (await page.textContent('body')).includes('名称必填')]);
 
@@ -87,7 +87,7 @@ const { chromium } = require('playwright');
   await pickRow('SST').locator('input[type="checkbox"]').first().check();
   await pickRow('LS_H').locator('input[type="number"]').first().fill('70');
   await pickRow('SST').locator('input[type="number"]').first().fill('70');
-  await page.getByRole('button', { name: '保存场景' }).click();
+  await page.getByRole('button', { name: '创建场景并发布 rev1' }).click();
   await page.waitForTimeout(300);
   checks.push(['最低掺量和>100客户端拦截', (await page.textContent('body')).includes('超过 100')]);
   await page.getByRole('button', { name: '取消' }).click();
@@ -111,7 +111,7 @@ const { chromium } = require('playwright');
         .locator('tbody tr').filter({ hasText: 'FA' });
       await rainFa.locator('input').first().fill('26');
     }
-    await page.getByRole('button', { name: '保存场景' }).click();
+    await page.getByRole('button', { name: '创建场景并发布 rev1' }).click();
   };
 
   await createWith(uname, { cheap: true, rain: true });
@@ -120,9 +120,10 @@ const { chromium } = require('playwright');
   checks.push(['合法场景保存后自动求解', bodyNow.includes('最低成本方案')]);
   checks.push(['场景列表出现自建徽标', bodyNow.includes('自建')]);
 
-  // 该场景可编辑/删除
-  checks.push(['自建场景有编辑/删除按钮',
-    (await page.getByRole('button', { name: '编辑此场景' }).count()) === 1]);
+  // 该场景可发起修订/删除
+  checks.push(['自建场景有修订/删除按钮',
+    (await page.getByRole('button', { name: '从发布版新建修订草稿' }).count()) === 1 &&
+    (await page.getByRole('button', { name: '删除此场景' }).count()) === 1]);
 
   // 雨季求解 + 历史
   await page.getByRole('button', { name: '② 按雨季含水率/附加成本求解' }).click();
@@ -167,7 +168,7 @@ const { chromium } = require('playwright');
     .locator('input[type="number"]').first().fill(String(v));
   await setMin('LS_L', '35');
   await setMin('CG', '15');
-  await page.getByRole('button', { name: '保存场景' }).click();
+  await page.getByRole('button', { name: '创建场景并发布 rev1' }).click();
   await page.waitForTimeout(1800);
   const confBody = await page.textContent('body');
   checks.push(['自定义冲突场景展示具体冲突项',

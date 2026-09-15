@@ -2,7 +2,7 @@
 import json
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -13,8 +13,9 @@ from .chemistry import ChemistryError, MaterialAnalyses, blend
 from .config import settings
 from .database import Base, engine, get_db
 from .seed import seed
-from .service import ANALYTES, run_scenario
-from .scenario_validation import ensure_schema, validate_scenario
+from .service import ANALYTES, run_revision, run_scenario
+from .scenario_validation import ensure_schema, validate_scenario, validate_payload
+from . import revision_service as revs
 
 
 @asynccontextmanager
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
     with Session(engine) as db:
         ensure_schema(db)
         seed(db)
+        revs.recover(db)
     yield
 
 
@@ -144,10 +146,19 @@ def set_availability(code: str, body: schemas.AvailabilityIn, db: Session = Depe
 
 # ---------------- 场景 ----------------
 
-def _scenario_dto(s: models.Scenario) -> dict:
-    return {
+def _scenario_dto(s: models.Scenario, db: Session | None = None) -> dict:
+    draft = db.scalar(select(models.ScenarioRevision).where(
+        models.ScenarioRevision.scenario_id == s.id,
+        models.ScenarioRevision.status == "draft")) if db is not None else None
+    pub = db.get(models.ScenarioRevision, s.published_revision_id) \
+        if db is not None and s.published_revision_id else None
+    dto = {
         "id": s.id, "name": s.name, "description": s.description,
         "built_in": s.built_in, "created_at": s.created_at.isoformat(),
+        "published_revision_no": pub.revision_no if pub else None,
+        "draft_revision_no": draft.revision_no if draft else None,
+        "draft_revision_id": draft.id if draft else None,
+        "draft_lock_version": draft.lock_version if draft else None,
         "targets": {"kh": [s.kh_min, s.kh_max], "sm": [s.sm_min, s.sm_max],
                     "im": [s.im_min, s.im_max]},
         "hazards": {"mgo_max": s.mgo_max, "so3_max": s.so3_max,
@@ -158,9 +169,12 @@ def _scenario_dto(s: models.Scenario) -> dict:
         "materials": [
             {"code": it.material.code, "name": it.material.name,
              "min_pct": it.min_pct, "max_pct": it.max_pct,
-             "preferred_cheap": it.preferred_cheap}
+             "preferred_cheap": it.preferred_cheap,
+             "assay_id": it.material.active_assay_id,
+             "cost_id": it.material.active_cost_id}
             for it in s.items],
     }
+    return dto
 
 
 @app.get("/api/scenarios")
@@ -170,64 +184,156 @@ def list_scenarios(db: Session = Depends(get_db)):
             selectinload(models.Scenario.items).selectinload(models.ScenarioMaterial.material))
         .order_by(models.Scenario.built_in.desc(), models.Scenario.id)
     ).all()
-    return [_scenario_dto(s) for s in rows]
+    return [_scenario_dto(s, db) for s in rows]
 
 
-def _persist_scenario(db: Session, sc: models.Scenario, body: schemas.ScenarioIn,
-                      resolved: dict) -> None:
-    sc.name = body.name.strip()
-    sc.description = body.description
-    sc.kh_min, sc.kh_max = body.kh_min, body.kh_max
-    sc.sm_min, sc.sm_max = body.sm_min, body.sm_max
-    sc.im_min, sc.im_max = body.im_min, body.im_max
-    sc.mgo_max, sc.so3_max = body.mgo_max, body.so3_max
-    sc.alkali_eq_max, sc.cl_max = body.alkali_eq_max, body.cl_max
-    sc.denom_floor = body.denom_floor
-    sc.rain_overrides = json.dumps(body.rain_overrides or {}, ensure_ascii=False)
-    sc.rain_extra_cost_json = json.dumps(body.rain_extra_cost or {}, ensure_ascii=False)
-    # 更新时先删除旧原料行并 flush，避免唯一约束在同一 flush 内与新行冲突
-    if sc.id is not None:
-        db.query(models.ScenarioMaterial).filter_by(scenario_id=sc.id).delete()
-        db.flush()
-    sc.items = [
-        models.ScenarioMaterial(
-            material_id=resolved["materials"][it.material_code][0].id,
-            min_pct=it.min_pct, max_pct=it.max_pct,
-            preferred_cheap=it.preferred_cheap)
-        for it in body.materials
-    ]
+def _rev_error(e: revs.RevError) -> HTTPException:
+    return HTTPException(e.status_code, e.body)
 
 
 @app.post("/api/scenarios", status_code=201)
-def create_scenario(body: schemas.ScenarioIn, db: Session = Depends(get_db)):
-    """创建自定义场景。全部校验通过前不创建任何行（非法不落半成品）。"""
+def create_scenario(body: schemas.ScenarioIn, db: Session = Depends(get_db),
+                    idempotency_key: str | None = Header(default=None)):
+    """建自定义场景 = 建单并发布 rev1（单事务，非法不落半成品）。"""
     try:
-        resolved = validate_scenario(db, body)
+        validate_scenario(db, body)
+        payload = revs.payload_from_input(db, body)
+        out = revs.create_published(db, payload, idempotency_key)
     except ValueError as e:
         raise HTTPException(422, {"message": "场景校验失败", "fields": json.loads(str(e))})
-    sc = models.Scenario(built_in=False)
-    _persist_scenario(db, sc, body, resolved)
-    db.add(sc)
-    db.commit()
-    db.refresh(sc)
-    return _scenario_dto(sc)
+    except revs.RevError as e:
+        raise _rev_error(e)
+    db.refresh(db.get(models.Scenario, out["scenario"]["id"]))
+    return _scenario_dto(db.get(models.Scenario, out["scenario"]["id"]), db)
+
+
+# ---------------- 修订版：草稿 / 发布 / 回滚 / 时间线 ----------------
+
+def _payload_from_body(body: schemas.ScenarioIn) -> dict:
+    """修订编辑入参的材料行可携带 assay_id/cost_id；缺省由当前生效引用填充。"""
+    materials = []
+    for it in body.materials:
+        materials.append({
+            "code": it.material_code,
+            "assay_id": getattr(it, "assay_id", None),
+            "cost_id": getattr(it, "cost_id", None),
+            "min_pct": it.min_pct, "max_pct": it.max_pct,
+            "preferred_cheap": it.preferred_cheap,
+        })
+    return {
+        "name": body.name.strip(), "description": body.description,
+        "kh_min": body.kh_min, "kh_max": body.kh_max,
+        "sm_min": body.sm_min, "sm_max": body.sm_max,
+        "im_min": body.im_min, "im_max": body.im_max,
+        "mgo_max": body.mgo_max, "so3_max": body.so3_max,
+        "alkali_eq_max": body.alkali_eq_max, "cl_max": body.cl_max,
+        "denom_floor": body.denom_floor,
+        "rain_overrides": body.rain_overrides or {},
+        "rain_extra_cost": body.rain_extra_cost or {},
+        "materials": materials,
+    }
+
+
+def _resolve_pinned(db: Session, payload: dict) -> dict:
+    """行内未钉 assay_id/cost_id 时补当前生效引用。"""
+    for row in payload["materials"]:
+        m = db.scalar(select(models.Material).where(models.Material.code == row["code"]))
+        if m is not None:
+            row["assay_id"] = row.get("assay_id") or m.active_assay_id
+            row["cost_id"] = row.get("cost_id") or m.active_cost_id
+    return payload
+
+
+@app.get("/api/scenarios/{scenario_id}/revisions")
+def scenario_revisions(scenario_id: int, db: Session = Depends(get_db)):
+    sc = db.get(models.Scenario, scenario_id)
+    if sc is None:
+        raise HTTPException(404, "场景不存在")
+    dtos = revs.list_timeline(db, sc)
+    pub_payload = json.loads(
+        db.get(models.ScenarioRevision, sc.published_revision_id).payload_json)         if sc.published_revision_id else None
+    for d in dtos:
+        if d["status"] == "draft" and pub_payload is not None:
+            d["diff_from_published"] = revs.diff_payloads(pub_payload, d["payload"])
+    return dtos
+
+
+@app.get("/api/scenarios/{scenario_id}/revisions/{revision_no}")
+def get_revision(scenario_id: int, revision_no: int, db: Session = Depends(get_db)):
+    sc = db.get(models.Scenario, scenario_id)
+    if sc is None:
+        raise HTTPException(404, "场景不存在")
+    rev = db.scalar(select(models.ScenarioRevision).where(
+        models.ScenarioRevision.scenario_id == scenario_id,
+        models.ScenarioRevision.revision_no == revision_no))
+    if rev is None:
+        raise HTTPException(404, "修订版不存在")
+    return revs.revision_dto(db, rev)
+
+
+class DraftIn(schemas.ScenarioIn):
+    lock_version: int | None = None
+    source_revision_no: int | None = None
+
+
+@app.put("/api/scenarios/{scenario_id}/draft")
+def save_draft(scenario_id: int, body: DraftIn, db: Session = Depends(get_db),
+               idempotency_key: str | None = Header(default=None)):
+    try:
+        payload = _resolve_pinned(db, _payload_from_body(body))
+        validate_payload(db, payload, exclude_id=scenario_id)
+        out = revs.save_draft(db, scenario_id, payload, body.lock_version,
+                              body.source_revision_no, idempotency_key)
+    except ValueError as e:
+        raise HTTPException(422, {"message": "草稿校验失败", "fields": json.loads(str(e))})
+    except revs.RevError as e:
+        raise _rev_error(e)
+    return out
+
+
+@app.post("/api/scenarios/{scenario_id}/publish")
+def publish(scenario_id: int, body: dict, db: Session = Depends(get_db),
+            idempotency_key: str | None = Header(default=None)):
+    try:
+        out = revs.publish_draft(db, scenario_id, int(body.get("lock_version")),
+                                 idempotency_key)
+    except ValueError as e:
+        raise HTTPException(422, {"message": "发布校验失败", "fields": json.loads(str(e))})
+    except revs.RevError as e:
+        raise _rev_error(e)
+    return out
+
+
+@app.post("/api/scenarios/{scenario_id}/rollback-draft")
+def rollback_draft(scenario_id: int, body: dict, db: Session = Depends(get_db),
+                   idempotency_key: str | None = Header(default=None)):
+    try:
+        sc = db.get(models.Scenario, scenario_id)
+        if sc is None:
+            raise HTTPException(404, "场景不存在")
+        src_no = body.get("source_revision_no")
+        if src_no is None and sc.published_revision_id:
+            src_no = db.get(models.ScenarioRevision,
+                            sc.published_revision_id).revision_no
+        out = revs.rollback_as_draft(db, scenario_id, int(src_no), idempotency_key)
+    except revs.RevError as e:
+        raise _rev_error(e)
+    return out
+
+
+@app.delete("/api/scenarios/{scenario_id}/draft")
+def discard_draft(scenario_id: int, db: Session = Depends(get_db)):
+    try:
+        revs.discard_draft(db, scenario_id)
+    except revs.RevError as e:
+        raise _rev_error(e)
+    return {"status": "discarded"}
 
 
 @app.put("/api/scenarios/{scenario_id}")
-def update_scenario(scenario_id: int, body: schemas.ScenarioIn, db: Session = Depends(get_db)):
-    sc = db.get(models.Scenario, scenario_id)
-    if not sc:
-        raise HTTPException(404, "场景不存在")
-    if sc.built_in:
-        raise HTTPException(403, "内置场景不可修改")
-    try:
-        resolved = validate_scenario(db, body, exclude_id=scenario_id)
-    except ValueError as e:
-        raise HTTPException(422, {"message": "场景校验失败", "fields": json.loads(str(e))})
-    _persist_scenario(db, sc, body, resolved)
-    db.commit()
-    db.refresh(sc)
-    return _scenario_dto(sc)
+def update_scenario_legacy(scenario_id: int, body: schemas.ScenarioIn,
+                           db: Session = Depends(get_db)):
+    raise HTTPException(405, {"message": "已发布修订不可直接改写；请创建草稿并发布"})
 
 
 @app.delete("/api/scenarios/{scenario_id}")
@@ -237,8 +343,13 @@ def delete_scenario(scenario_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "场景不存在")
     if sc.built_in:
         raise HTTPException(403, "内置场景不可删除")
-    db.query(models.ScenarioMaterial).filter_by(scenario_id=scenario_id).delete()
+    db.query(models.RevisionRequest).filter(
+        models.RevisionRequest.revision_id.in_(
+            select(models.ScenarioRevision.id).where(
+                models.ScenarioRevision.scenario_id == scenario_id))).delete(synchronize_session=False)
     db.query(models.Solution).filter_by(scenario_id=scenario_id).delete()
+    db.query(models.ScenarioMaterial).filter_by(scenario_id=scenario_id).delete()
+    db.query(models.ScenarioRevision).filter_by(scenario_id=scenario_id).delete()
     db.delete(sc)
     db.commit()
     return {"status": "deleted", "id": scenario_id}
@@ -259,13 +370,29 @@ def _load_scenario(db: Session, scenario_id: int) -> models.Scenario:
 
 @app.post("/api/scenarios/{scenario_id}/solve")
 def solve_scenario(scenario_id: int, profile: str = Query("base", pattern="^(base|rain)$"),
+                   revision_no: int | None = Query(None),
                    db: Session = Depends(get_db)):
     s = _load_scenario(db, scenario_id)
+    if revision_no is not None:
+        # 重放审计：只能重放已发布（冻结）修订，草稿不可求解
+        rev = db.scalar(select(models.ScenarioRevision).where(
+            models.ScenarioRevision.scenario_id == scenario_id,
+            models.ScenarioRevision.revision_no == revision_no))
+        if rev is None:
+            raise HTTPException(404, "修订版不存在")
+        if rev.status != "published":
+            raise HTTPException(409, {"message": "草稿不可求解，请先发布",
+                                      "revision_no": rev.revision_no})
+    else:
+        rev = db.get(models.ScenarioRevision, s.published_revision_id)
+        if rev is None:
+            raise HTTPException(409, "场景没有已发布修订版，不能求解")
     try:
-        result, saved = run_scenario(db, s, profile)
+        result, saved = run_revision(db, s, rev, profile)
     except ChemistryError as e:
         raise HTTPException(422, {"message": str(e), "code": e.code, "details": e.details})
     return {"status": result["status"], "profile": profile,
+            "revision_no": rev.revision_no,
             "conflicts": result["conflicts"],
             "solutions": [_solution_dto(sol) for sol in saved]}
 
@@ -273,6 +400,8 @@ def solve_scenario(scenario_id: int, profile: str = Query("base", pattern="^(bas
 def _solution_dto(sol: models.Solution) -> dict:
     return {
         "solution_id": sol.id, "scenario_id": sol.scenario_id,
+        "scenario_revision_id": sol.scenario_revision_id,
+        "revision_no": sol.revision_no,
         "profile": sol.profile, "mode": sol.mode, "status": sol.status,
         "cost_dry_t": sol.cost_dry_t, "cost_wet_t": sol.cost_wet_t,
         "kh": sol.kh, "sm": sol.sm, "im": sol.im,
@@ -284,14 +413,15 @@ def _solution_dto(sol: models.Solution) -> dict:
 
 
 @app.get("/api/scenarios/{scenario_id}/solutions")
-def list_solutions(scenario_id: int, db: Session = Depends(get_db)):
+def list_solutions(scenario_id: int, revision_no: int | None = None,
+                   db: Session = Depends(get_db)):
     s = db.get(models.Scenario, scenario_id)
     if s is None:
         raise HTTPException(404, "场景不存在")
-    rows = db.scalars(
-        select(models.Solution).where(models.Solution.scenario_id == scenario_id)
-        .order_by(models.Solution.id.desc())
-    ).all()
+    q = select(models.Solution).where(models.Solution.scenario_id == scenario_id)
+    if revision_no is not None:
+        q = q.where(models.Solution.revision_no == revision_no)
+    rows = db.scalars(q.order_by(models.Solution.id.desc())).all()
     return [_solution_dto(r) for r in rows]
 
 
